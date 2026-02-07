@@ -86,7 +86,7 @@ fi
 # --- Step 2: Create Directory Structure ---
 echo ""
 echo "--- Step 2: Creating directory structure ---"
-sudo mkdir -p "$DEPLOY_DIR"/{postgres/data,postgres/init,n8n/data,runners}
+sudo mkdir -p "$DEPLOY_DIR"/{postgres/data,postgres/init,n8n/data,runners,redis/data,docling/{hf-cache,models,documents}}
 sudo chown -R "$(id -u):$(id -g)" "$DEPLOY_DIR"
 log "Created $DEPLOY_DIR"
 
@@ -101,8 +101,10 @@ cp "$SCRIPT_DIR/postgres/postgresql.conf"         "$DEPLOY_DIR/postgres/"
 cp "$SCRIPT_DIR/postgres/init/01-init-n8n.sql"    "$DEPLOY_DIR/postgres/init/"
 cp "$SCRIPT_DIR/runners/Dockerfile"               "$DEPLOY_DIR/runners/"
 cp "$SCRIPT_DIR/runners/n8n-task-runners.json"    "$DEPLOY_DIR/runners/"
+cp "$SCRIPT_DIR/docling/download-models.sh"       "$DEPLOY_DIR/docling/"
 
 chmod 600 "$DEPLOY_DIR/.env"
+chmod +x "$DEPLOY_DIR/docling/download-models.sh"
 log "All config files copied"
 
 # --- Step 4: Generate Secrets & Configure Socket ---
@@ -112,10 +114,12 @@ echo "--- Step 4: Generating secrets ---"
 DB_PASS=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
 ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
 RUNNER_TOKEN=$(openssl rand -base64 48 | tr -d '/+=' | head -c 48)
+REDIS_PASS=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
 
 sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|"             "$DEPLOY_DIR/.env"
 sed -i "s|^N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}|" "$DEPLOY_DIR/.env"
 sed -i "s|^RUNNERS_AUTH_TOKEN=.*|RUNNERS_AUTH_TOKEN=${RUNNER_TOKEN}|"   "$DEPLOY_DIR/.env"
+sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${REDIS_PASS}|"           "$DEPLOY_DIR/.env"
 sed -i "s|^PODMAN_SOCKET=.*|PODMAN_SOCKET=${PODMAN_SOCKET}|"          "$DEPLOY_DIR/.env"
 
 log "Secrets generated and socket path configured"
@@ -124,6 +128,7 @@ echo ""
 echo "  DB_PASSWORD        = ${DB_PASS}"
 echo "  N8N_ENCRYPTION_KEY = ${ENCRYPTION_KEY}"
 echo "  RUNNERS_AUTH_TOKEN = ${RUNNER_TOKEN}"
+echo "  REDIS_PASSWORD     = ${REDIS_PASS}"
 echo "  PODMAN_SOCKET      = ${PODMAN_SOCKET}"
 echo ""
 warn "The encryption key is critical — losing it means losing access to all stored credentials in n8n."
@@ -136,10 +141,10 @@ cd "$DEPLOY_DIR"
 log "Building custom runners image..."
 $COMPOSE build n8n-runners
 
-log "Starting PostgreSQL first..."
-$COMPOSE up -d postgres
+log "Starting PostgreSQL and Redis first..."
+$COMPOSE up -d postgres redis
 
-echo "Waiting 15s for PostgreSQL to initialize..."
+echo "Waiting 15s for PostgreSQL and Redis to initialize..."
 sleep 15
 
 # Verify PG is ready
@@ -149,14 +154,21 @@ else
     warn "PostgreSQL may still be initializing. Continuing anyway (n8n will retry)..."
 fi
 
+# Verify Redis is ready
+if podman exec n8n-redis redis-cli -a "$REDIS_PASS" ping 2>/dev/null | grep -q "PONG"; then
+    log "Redis is ready"
+else
+    warn "Redis may still be initializing. Continuing anyway..."
+fi
+
 log "Starting n8n..."
 $COMPOSE up -d n8n
 
 echo "Waiting 20s for n8n to start..."
 sleep 20
 
-log "Starting task runners and watchtower..."
-$COMPOSE up -d n8n-runners watchtower
+log "Starting task runners, Docling Serve, and watchtower..."
+$COMPOSE up -d n8n-runners docling watchtower
 
 # --- Step 6: Verify ---
 echo ""
@@ -167,7 +179,7 @@ $COMPOSE ps
 echo ""
 
 log "Container health status:"
-for svc in n8n-postgres n8n n8n-runners watchtower; do
+for svc in n8n-postgres n8n-redis n8n n8n-runners n8n-docling watchtower; do
     status=$(podman inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not found")
     health=$(podman inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "N/A")
     if [ "$status" = "running" ]; then
@@ -185,11 +197,21 @@ else
     warn "PostgreSQL may still be initializing. Check: $COMPOSE logs postgres"
 fi
 
+# Redis connectivity check
+if podman exec n8n-redis redis-cli -a "$REDIS_PASS" ping 2>/dev/null | grep -q "PONG"; then
+    log "Redis: PONG response received"
+else
+    warn "Redis may still be initializing. Check: $COMPOSE logs redis"
+fi
+
 echo ""
 echo "============================================="
 log "Deployment complete!"
 echo ""
 echo "  Dashboard:     https://n8n.iitbacr.space"
+echo "  Docling UI:    http://localhost:5001/ui"
+echo "  Docling Docs:  http://localhost:5001/docs"
+echo ""
 echo "  Logs:          cd $DEPLOY_DIR && $COMPOSE logs -f"
 echo "  Status:        cd $DEPLOY_DIR && $COMPOSE ps"
 echo "  Resources:     podman stats --no-stream"
@@ -199,4 +221,11 @@ echo "  Update check:  $COMPOSE logs watchtower"
 echo "  Manual update:"
 echo "    $COMPOSE pull n8n"
 echo "    $COMPOSE up -d n8n"
+echo ""
+echo "  Redis Chat Memory — configure in n8n UI:"
+echo "    Host: n8n-redis   Port: 6379   Password: (in .env)"
+echo ""
+echo "  ⚠ Download Docling models (recommended — avoids cold-start delays):"
+echo "    Wait ~2 min for Docling to finish booting, then run:"
+echo "    cd $DEPLOY_DIR && ./docling/download-models.sh"
 echo "============================================="

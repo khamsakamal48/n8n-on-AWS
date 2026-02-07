@@ -4,7 +4,7 @@
 - **Instance:** AWS EC2 t3.xlarge (4 vCPU, 16 GB RAM)
 - **Container runtime:** Podman with podman-compose
 - **Workload:** 10–50 concurrent n8n workflows with AI agents
-- **Services:** n8n, PostgreSQL 16, n8n Task Runners (JS + Python), Watchtower (monitor)
+- **Services:** n8n, PostgreSQL 16, Redis 7, n8n Task Runners (JS + Python), Docling Serve (document API), Watchtower (monitor)
 
 ---
 
@@ -40,10 +40,14 @@ systemctl --user enable --now podman.socket  # rootless
 |-----------|-------------|-----------|-----------|
 | OS + Podman overhead | ~1.5 GB | — | Kernel, systemd, container runtime |
 | PostgreSQL | 4 GB | 1.5 CPU | shared_buffers(1GB) + work_mem + connections |
+| Redis | 768 MB | 0.3 CPU | In-memory chat history + 512MB maxmemory cap |
 | n8n (main) | 6 GB | 1.5 CPU | Node.js heap(4GB) + native allocations |
 | n8n Task Runners | 3 GB | 1.0 CPU | Python/JS code execution (pandas/numpy) |
 | Watchtower | 128 MB | 0.1 CPU | Lightweight image checker |
-| Safety margin | ~1.4 GB | — | Prevents OOM kills during peak |
+| Docling Serve | *uncapped* | *uncapped* | Limits commented out — enable after tuning |
+| Safety margin | ~0.6 GB | — | Prevents OOM kills during peak |
+
+> **Note on Docling:** Resource limits for Docling are commented out in docker-compose.yml. Once you observe real-world usage with `podman stats --no-stream`, uncomment and set limits. Suggested starting point: 4 GB memory, 2.0 CPU. When enabling Docling limits, reduce n8n to 4 GB and runners to 2 GB to stay within the 16 GB envelope.
 
 ---
 
@@ -51,7 +55,7 @@ systemctl --user enable --now podman.socket  # rootless
 
 ```
 /opt/n8n-production/
-├── docker-compose.yml          # Main orchestration
+├── docker-compose.yml          # Main orchestration (6 services)
 ├── .env                        # Secrets + socket path (chmod 600)
 ├── deploy.sh                   # Automated deployment script
 ├── postgres/
@@ -59,11 +63,18 @@ systemctl --user enable --now podman.socket  # rootless
 │   ├── init/
 │   │   └── 01-init-n8n.sql    # First-boot DB setup
 │   └── data/                   # PG data (auto-created)
+├── redis/
+│   └── data/                   # Redis AOF + RDB persistence
 ├── n8n/
 │   └── data/                   # n8n data (auto-created)
-└── runners/
-    ├── Dockerfile              # Custom runners image
-    └── n8n-task-runners.json   # Runner config
+├── runners/
+│   ├── Dockerfile              # Custom runners image
+│   └── n8n-task-runners.json   # Runner config
+└── docling/
+    ├── download-models.sh      # Pre-download VLM models (run after deploy)
+    ├── hf-cache/               # HuggingFace model cache (auto-populated)
+    ├── models/                 # Docling pipeline model artifacts
+    └── documents/              # Shared document I/O directory
 ```
 
 ---
@@ -79,9 +90,13 @@ ssh ec2-user@your-server
 cd /tmp/n8n-production
 chmod +x deploy.sh
 ./deploy.sh
+
+# 3. Download Docling VLM models (wait ~2 min for Docling to boot first)
+cd /opt/n8n-production
+./docling/download-models.sh
 ```
 
-The script handles: socket detection, secret generation, directory setup, staged startup (PG → n8n → runners → watchtower), and health verification.
+The script handles: socket detection, secret generation, directory setup, staged startup (PG + Redis → n8n → runners + Docling + watchtower), and health verification.
 
 ---
 
@@ -93,8 +108,142 @@ Since `depends_on: condition: service_healthy` is broken in podman-compose, star
 2. **restart: unless-stopped** ensures services that start before dependencies are ready will automatically retry
 3. **n8n** has built-in DB connection retry logic
 4. **n8n-runners** auto-reconnects to the broker
+5. **Redis** and **Docling Serve** are independent services — no ordering dependencies
 
 After initial deployment, `podman-compose up -d` starts all services. The restart policy handles any race conditions.
+
+---
+
+## Redis — Chat Memory & Workflow Cache
+
+### Why Redis?
+
+Redis is the recommended backend for n8n's **Redis Chat Memory** LangChain node, which persists AI agent conversation history across workflow runs. Without Redis, chat memory only lives in the workflow execution context and is lost when the workflow completes.
+
+Key benefits for n8n:
+- **Persistent chat history**: Conversations survive workflow restarts and n8n upgrades
+- **Session isolation**: Each chat/user gets a unique session key — multiple chatbots can share one Redis
+- **Sub-millisecond reads**: Conversation context is retrieved instantly
+- **TTL support**: Auto-expire stale conversations to manage memory
+- **Workflow caching**: Also usable via the Redis node for rate limiting, deduplication, and temporary data sharing between workflows
+
+### Configuration in n8n
+
+1. Go to **Credentials** → **New Credential** → **Redis**
+2. Set:
+   - **Host:** `n8n-redis`
+   - **Port:** `6379`
+   - **Password:** (from `.env` file → `REDIS_PASSWORD`)
+   - **Database:** `0` (default)
+3. In your AI agent workflow, add a **Redis Chat Memory** sub-node and select this credential
+
+### Data Persistence
+
+Redis is configured with both AOF (append-only file) and periodic RDB snapshots:
+- `appendonly yes` — every write is logged, minimal data loss on crash
+- `save 900 1` and `save 300 10` — periodic snapshots for faster recovery
+- `maxmemory 512mb` with `allkeys-lru` eviction — older chat sessions are evicted when memory is full
+
+Data is stored in `./redis/data/` and persists across container restarts.
+
+### Monitoring Redis
+
+```bash
+# Check Redis is responding
+podman exec n8n-redis redis-cli -a "$(grep REDIS_PASSWORD .env | cut -d= -f2)" ping
+
+# Check memory usage
+podman exec n8n-redis redis-cli -a "$(grep REDIS_PASSWORD .env | cut -d= -f2)" info memory
+
+# List all chat session keys
+podman exec n8n-redis redis-cli -a "$(grep REDIS_PASSWORD .env | cut -d= -f2)" keys "*"
+
+# Monitor live commands (Ctrl+C to stop)
+podman exec n8n-redis redis-cli -a "$(grep REDIS_PASSWORD .env | cut -d= -f2)" monitor
+```
+
+---
+
+## Docling Serve — Document Conversion API
+
+### Why Docling Serve (not Docling library)?
+
+You need **Docling Serve** (not the raw Docling Python library) because:
+- It exposes Docling as a **REST API** — perfect for calling from n8n HTTP Request nodes
+- It handles async document processing with task queuing
+- It includes a Swagger UI at `/docs` and a web UI at `/ui` for testing
+- The container comes with all default models pre-baked — no Python environment setup needed
+- It supports both synchronous and asynchronous conversion endpoints
+
+### Container Image
+
+We use `quay.io/docling-project/docling-serve-cpu:latest` — the CPU-only variant. Since the t3.xlarge has no GPU, this image excludes CUDA dependencies and is smaller (~4 GB vs ~8 GB for GPU images).
+
+### Pre-bundled Models (in the container image)
+
+These models are included in the container image and require no download:
+- **DocLayNet layout model** — RT-DETR based layout analysis
+- **TableFormer** — table structure recognition (fast + accurate modes)
+- **Picture classifier** — DocumentFigureClassifier v2.0 (ViT)
+- **Code & formula extractor** — CodeFormulaV2
+- **RapidOCR** — fast CPU-friendly OCR engine
+
+### Additional VLM Models (downloaded by `download-models.sh`)
+
+These are small VLMs that run on CPU without GPU:
+
+| Model | Size | Purpose | CPU Speed |
+|-------|------|---------|-----------|
+| **Granite-Docling-258M** ⭐ | 258M params | Full-page → DocTags conversion | ~20-30s/page |
+| **SmolDocling-256M** | 256M params | Full-page → DocTags conversion | ~20-30s/page |
+| **SmolVLM-256M-Instruct** | 256M params | Picture description | ~5-10s/image |
+
+> All three models are tiny (256M parameters) and designed to run on CPU. They provide OCR-like document understanding via vision-language model inference. For most workflows, the **standard pipeline** (layout + table + RapidOCR) is fastest and sufficient. Use VLMs only when you need semantic understanding of document content.
+
+### Using Docling from n8n
+
+**File upload conversion:**
+```
+HTTP Request node:
+  Method: POST
+  URL: http://n8n-docling:5001/v1/convert/file
+  Content-Type: multipart/form-data
+  Body: file = {{ $binary.data }}
+```
+
+**URL-based conversion:**
+```
+HTTP Request node:
+  Method: POST
+  URL: http://n8n-docling:5001/v1/convert/source
+  Content-Type: application/json
+  Body: {
+    "sources": [{"kind": "http", "url": "https://example.com/document.pdf"}]
+  }
+```
+
+**Async conversion (for large documents):**
+```
+Step 1: POST http://n8n-docling:5001/v1/convert/file/async → returns task_id
+Step 2: GET  http://n8n-docling:5001/v1/status/poll/{task_id}?wait=30
+```
+
+### Monitoring Docling
+
+```bash
+# Check health
+curl http://localhost:5001/health
+
+# View Swagger API docs
+# Open in browser: http://<server-ip>:5001/docs
+
+# Check container logs
+podman-compose logs -f docling
+
+# Check model cache size
+du -sh /opt/n8n-production/docling/hf-cache/
+du -sh /opt/n8n-production/docling/models/
+```
 
 ---
 
@@ -118,6 +267,12 @@ podman-compose up -d postgres
 # Rebuild runners (after changing Dockerfile or dependencies)
 podman-compose build n8n-runners
 podman-compose up -d n8n-runners
+
+# Update Docling Serve
+podman-compose pull docling
+podman-compose up -d docling
+# Re-download models if needed (new image may have new defaults)
+./docling/download-models.sh
 ```
 
 ---
@@ -134,10 +289,15 @@ podman-compose ps
 # Logs (follow)
 podman-compose logs -f n8n
 podman-compose logs -f postgres
+podman-compose logs -f redis
+podman-compose logs -f docling
 
 # PostgreSQL connections
 podman exec n8n-postgres psql -U n8n -d n8n \
   -c "SELECT count(*) FROM pg_stat_activity;"
+
+# Redis memory and keys
+podman exec n8n-redis redis-cli -a "$(grep REDIS_PASSWORD .env | cut -d= -f2)" info memory
 
 # Check t3 CPU credit balance (from EC2 host)
 aws cloudwatch get-metric-statistics \

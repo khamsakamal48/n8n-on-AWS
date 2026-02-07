@@ -3,6 +3,14 @@
 # =============================================================================
 # Fully Podman-compatible (tested against podman-compose 1.x)
 #
+# Services:
+#   - PostgreSQL 16  (database)
+#   - Redis 7        (queue broker + AI chat memory)
+#   - n8n            (workflow engine)
+#   - n8n Runners    (external JS + Python task execution)
+#   - Docling Serve  (document conversion API — CPU-only)
+#   - Watchtower     (image update monitor)
+#
 # Usage:
 #   podman-compose up -d
 #   podman-compose logs -f
@@ -32,7 +40,7 @@ services:
   # Key tuning: shared_buffers=1GB, work_mem=32MB, max_connections=60
   # ---------------------------------------------------------------------------
   postgres:
-    image: docker.io/library/postgres:latest
+    image: docker.io/library/postgres:16-bookworm
     container_name: n8n-postgres
     restart: unless-stopped
     networks:
@@ -75,6 +83,83 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------------
+  # Redis 7 — Queue Broker + AI Chat Memory
+  # ---------------------------------------------------------------------------
+  # Memory budget: 512 MB (of 16 GB total)
+  # CPU budget: 0.25 cores (of 4 total)
+  #
+  # Redis serves TWO purposes in this stack:
+  #
+  # 1. QUEUE MODE (production scaling)
+  #    Redis acts as a message broker for n8n queue mode, which separates
+  #    workflow execution from the n8n editor UI. Official benchmarks show
+  #    7x throughput increase (23 → 162 req/s) with 0% failure rate.
+  #    Queue mode is NOT enabled by default — to enable later, uncomment
+  #    EXECUTIONS_MODE=queue in the n8n service and add n8n-worker containers.
+  #
+  # 2. AI CHAT MEMORY (workflow-level)
+  #    n8n's "Redis Chat Memory" node stores conversation context for AI
+  #    agent workflows. Redis is fast but ephemeral — for durable long-term
+  #    chat history, use the "Postgres Chat Memory" node (uses existing PG).
+  #    Best practice: Redis for fast session context, Postgres for permanent.
+  #
+  # NOTE: Redis does NOT replace PostgreSQL as n8n's primary database.
+  #       All workflow definitions, credentials, and execution logs stay in PG.
+  #
+  # Configuration rationale:
+  #   --maxmemory 256mb       Cap memory usage (within 512MB container limit)
+  #   --maxmemory-policy      allkeys-lru evicts least-recently-used keys
+  #   --appendonly yes         Durable writes (AOF) — survives container restarts
+  #   --save                  RDB snapshots for backup recovery
+  #   --databases 4           DB 0: queue mode, DB 1: chat memory, DB 2-3: spare
+  # ---------------------------------------------------------------------------
+  redis:
+    image: docker.io/library/redis:latest
+    container_name: n8n-redis
+    restart: unless-stopped
+    networks:
+      - n8n-net
+    # NOTE: No port mapping — Redis is only accessible within n8n-net
+    # For debugging, temporarily add:  ports: ["127.0.0.1:6379:6379"]
+    volumes:
+      - ./redis/data:/data:Z
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+          cpus: "0.3"
+        reservations:
+          cpus: "0.1"
+          memory: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    command:
+      - redis-server
+            --requirepass ${REDIS_PASSWORD}
+            --maxmemory 256mb
+            --maxmemory-policy allkeys-lru
+            --appendonly yes
+            --appendfsync everysec
+            --save 900 1
+            --save 300 10
+            --save 60 10000
+            --tcp-backlog 511
+            --timeout 300
+            --tcp-keepalive 60
+            --databases 4
+
+  # ---------------------------------------------------------------------------
   # n8n — Main Application
   # ---------------------------------------------------------------------------
   # Memory budget: 6 GB (of 16 GB total)
@@ -84,6 +169,12 @@ services:
   # Startup: n8n retries DB connection internally on launch (built-in).
   # With restart: unless-stopped, even if PG isn't ready, n8n will
   # restart and successfully connect once PG is healthy.
+  #
+  # Redis connection:
+  #   Redis is configured and available. Queue mode is NOT enabled by default.
+  #   To enable queue mode later, uncomment EXECUTIONS_MODE=queue below.
+  #   Redis Chat Memory is available immediately via the n8n node —
+  #   use host "n8n-redis", port 6379, and the REDIS_PASSWORD.
   # ---------------------------------------------------------------------------
   n8n:
     image: docker.n8n.io/n8nio/n8n:stable
@@ -97,6 +188,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - postgres
+      - redis
     environment:
       # --- Timezone ---
       TZ: Asia/Kolkata
@@ -111,6 +203,23 @@ services:
       DB_POSTGRESDB_PASSWORD: ${DB_PASSWORD}
       DB_POSTGRESDB_SCHEMA: public
       DB_POSTGRESDB_POOL_SIZE: "20"
+
+      # --- Redis (available for Chat Memory + Queue Mode) ---
+      # These env vars configure n8n's Bull queue (backed by Redis).
+      # Even without queue mode enabled, Redis Chat Memory node can
+      # connect using these credentials via the n8n credential UI.
+      QUEUE_BULL_REDIS_HOST: n8n-redis
+      QUEUE_BULL_REDIS_PORT: "6379"
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      QUEUE_BULL_REDIS_DB: "0"
+
+      # --- Queue Mode (disabled by default — uncomment to enable) ---
+      # Enables distributed execution: n8n dispatches jobs to Redis,
+      # workers pick them up. Requires at least one n8n-worker container.
+      # See: https://docs.n8n.io/hosting/scaling/queue-mode/
+      #
+      # EXECUTIONS_MODE: queue
+      # QUEUE_HEALTH_CHECK_ACTIVE: "true"
 
       # --- Hosting ---
       N8N_HOST: ${N8N_HOST}
@@ -217,18 +326,134 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------------
-  # Watchtower — Update Monitor (notification only, NO auto-update)
+  # Docling Serve — Document Conversion API (CPU-only)
   # ---------------------------------------------------------------------------
-  # nickfedor/watchtower — actively maintained fork of the archived
-  # containrrr/watchtower (archived Dec 2025, incompatible with newer APIs).
-  # Drop-in replacement: same config, same env vars, just a different image.
+  # Docling Serve wraps IBM's Docling document conversion library as a REST API.
+  # Converts PDF, DOCX, PPTX, HTML, images → Markdown, JSON, DocTags.
   #
-  # Checks labeled containers every 24h and logs when updates are available.
-  # Does NOT auto-pull or restart.
+  # API Endpoints (accessible from n8n via HTTP Request node):
+  #   POST /v1/convert/source  — convert from URL
+  #   POST /v1/convert/file    — convert uploaded file
+  #   GET  /health             — health check
+  #   GET  /docs               — Swagger UI (API documentation)
+  #   GET  /ui                 — Gradio web UI (for manual testing)
   #
-  # Manual update workflow:
-  #   podman-compose pull n8n
-  #   podman-compose up -d n8n
+  # Pre-baked models (already in container image — no download needed):
+  #   - Layout analysis     (docling-layout-heron, RT-DETR based)
+  #   - Table structure     (TableFormer accurate + fast modes)
+  #   - Picture classifier  (DocumentFigureClassifier-v2.0, ViT)
+  #   - Code & formula      (CodeFormulaV2)
+  #   - EasyOCR             (English + Latin recognition models)
+  #
+  # Additional CPU-friendly models (auto-downloaded at first boot into
+  # persistent HF cache volume — only downloaded once):
+  #   - SmolVLM-256M-Instruct    (picture description, 256M params)
+  #   - Granite-Docling-258M     (VLM full-page → DocTags, 258M params) ⭐
+  #   - SmolDocling-256M         (VLM full-page → DocTags, 256M params)
+  #
+  # All models run on CPU. No GPU required.
+  # Performance on t3.xlarge (CPU-only):
+  #   Standard pipeline:  ~3s/page (layout + table + text extraction)
+  #   With EasyOCR:       ~13s/page (OCR is the most expensive operation)
+  #   With VLM convert:   ~20-40s/page (SmolDocling/GraniteDocling on CPU)
+  #
+  # n8n Workflow Integration:
+  #   Use HTTP Request node → POST http://n8n-docling:5001/v1/convert/file
+  #   Content-Type: multipart/form-data (for file upload)
+  #   Or POST http://n8n-docling:5001/v1/convert/source with JSON body
+  #   for URL-based conversion.
+  # ---------------------------------------------------------------------------
+  docling:
+    image: quay.io/docling-project/docling-serve-cpu:latest
+    container_name: n8n-docling
+    restart: unless-stopped
+    networks:
+      - n8n-net
+    ports:
+      # Bound to localhost only — access via n8n-net internally,
+      # or localhost:5001 on the host for debugging/Swagger UI
+      - "127.0.0.1:5001:5001"
+    environment:
+      # --- Server Configuration ---
+      DOCLING_SERVE_HOST: "0.0.0.0"
+      DOCLING_SERVE_PORT: "5001"
+      DOCLING_SERVE_ENABLE_UI: "true"
+
+      # --- Engine Configuration ---
+      # Local engine with 1 worker (safe for single Uvicorn process).
+      # share_models=true reuses loaded models across requests (saves RAM).
+      DOCLING_SERVE_ENG_KIND: local
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+      DOCLING_SERVE_ENG_LOC_SHARE_MODELS: "true"
+
+      # --- Model Loading ---
+      # Pre-load all pipeline models at boot to avoid cold-start delays
+      DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "true"
+
+      # --- Timeouts ---
+      # Generous timeouts for large documents processed on CPU
+      DOCLING_SERVE_MAX_SYNC_WAIT: "600"
+      DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT: "900"
+
+      # --- CPU Thread Tuning ---
+      # Match vCPU count. Prevents over-subscription with other services.
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      DOCLING_NUM_THREADS: "4"
+
+      # --- IMPORTANT: Single Uvicorn worker ---
+      # >1 workers with LocalOrchestrator causes "Task Not Found" 404 errors
+      UVICORN_WORKERS: "1"
+
+      # --- HuggingFace Model Cache ---
+      # Models from HF are cached in a persistent volume.
+      # SmolVLM, Granite-Docling, SmolDocling are downloaded here.
+      HF_HOME: /home/default/.cache/huggingface
+      TRANSFORMERS_CACHE: /home/default/.cache/huggingface/hub
+
+    volumes:
+      # Persistent HuggingFace model cache — survives container restarts
+      # VLM models (SmolVLM, SmolDocling, GraniteDocling) are stored here
+      - ./docling/hf-cache:/home/default/.cache/huggingface:Z
+      # Persistent docling pipeline model artifacts cache
+      - ./docling/models:/home/default/.cache/docling:Z
+      # Shared directory for document input/output with n8n
+      - ./docling/documents:/documents:Z
+
+    # --- Resource Limits (COMMENTED OUT — enable when ready to constrain) ---
+    # Suggested production values for t3.xlarge with Docling running
+    # alongside the full n8n stack. When enabling these limits, also
+    # rebalance other services:
+    #   n8n:     6 GB → 4 GB  (NODE_OPTIONS → --max-old-space-size=3072)
+    #   Runners: 3 GB → 2 GB
+    #   This frees 3 GB for Docling's 4 GB limit within the 16 GB total.
+    #
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 4g
+    #       cpus: "2.0"
+    #     reservations:
+    #       memory: 2g
+    #       cpus: "0.5"
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5001/health || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      # Long start_period: model loading at boot takes 60-120s on CPU
+      start_period: 180s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Watchtower — Update Monitor (notification only, NO auto-update)
   # ---------------------------------------------------------------------------
   watchtower:
     image: docker.io/nickfedor/watchtower:latest
@@ -241,29 +466,16 @@ services:
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_DEBUG: "false"
       WATCHTOWER_CLEANUP: "false"
-      # --- Notifications (configure later, after n8n is stable) ---
-      #
-      # Option A: Email (if you have SMTP)
+      # --- Notifications (configure after n8n is stable) ---
+      # Option A: Email
       # WATCHTOWER_NOTIFICATIONS: email
       # WATCHTOWER_NOTIFICATION_EMAIL_FROM: watchtower@iitbacr.space
-      # WATCHTOWER_NOTIFICATION_EMAIL_TO: your-email@iitbacr.space
-      # WATCHTOWER_NOTIFICATION_EMAIL_SERVER: smtp.iitbacr.space
-      # WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT: "587"
-      # WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER: user
-      # WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD: pass
+      # WATCHTOWER_NOTIFICATION_EMAIL_TO: admin@iitbacr.space
       #
-      # Option B: Slack webhook
-      # WATCHTOWER_NOTIFICATIONS: slack
-      # WATCHTOWER_NOTIFICATION_SLACK_HOOK_URL: https://hooks.slack.com/services/xxx
-      # WATCHTOWER_NOTIFICATION_SLACK_CHANNEL: "#infra-alerts"
-      #
-      # Option C: n8n webhook (set up after n8n is running)
+      # Option B: n8n webhook
       # WATCHTOWER_NOTIFICATIONS: shoutrrr
       # WATCHTOWER_NOTIFICATION_URL: generic+https://n8n.iitbacr.space/webhook/watchtower
     volumes:
-      # Podman socket path — auto-detected by deploy.sh and written to .env
-      # Rootful:  /run/podman/podman.sock
-      # Rootless: /run/user/<UID>/podman/podman.sock
       - ${PODMAN_SOCKET}:/var/run/docker.sock:ro
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
