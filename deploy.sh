@@ -89,6 +89,9 @@ echo ""
 echo "--- Step 2: Creating directory structure ---"
 sudo mkdir -p "$DEPLOY_DIR"/{postgres/data,postgres/init,n8n/data,runners,redis/data,docling/{hf-cache,models,documents}}
 sudo chown -R "$(id -u):$(id -g)" "$DEPLOY_DIR"
+# n8n container runs as user "node" (UID 1000). The data directory must be
+# writable by this UID, otherwise n8n fails with EACCES on /home/node/.n8n/config.
+sudo chown -R 1000:1000 "$DEPLOY_DIR/n8n/data"
 log "Created $DEPLOY_DIR"
 
 # --- Step 3: Copy Configuration Files ---
