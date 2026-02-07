@@ -6,6 +6,7 @@
 set -euo pipefail
 
 DEPLOY_DIR="/opt/n8n-production"
+export COMPOSE_PROJECT_NAME="n8n-automation"
 
 # Colors
 RED='\033[0;31m'
