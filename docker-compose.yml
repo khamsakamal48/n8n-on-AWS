@@ -9,7 +9,6 @@
 #   - n8n            (workflow engine)
 #   - n8n Runners    (external JS + Python task execution)
 #   - Docling Serve  (document conversion API — CPU-only)
-#   - Watchtower     (image update monitor)
 #
 # Usage:
 #   podman-compose up -d
@@ -21,8 +20,7 @@
 #     (driver_opts is silently ignored by podman-compose)
 #   - Simple depends_on (no condition: service_healthy)
 #     (broken in podman-compose; services handle retries internally)
-#   - nickfedor/watchtower (maintained fork of archived containrrr/watchtower)
-#   - Podman socket path configurable via PODMAN_SOCKET env var
+#   - Image update checks via systemd timer + check-updates.sh (replaces Watchtower)
 # =============================================================================
 
 version: "3.8"
@@ -74,8 +72,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options:
@@ -147,8 +143,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options:
@@ -267,8 +261,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options:
@@ -316,8 +308,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options:
@@ -443,51 +433,8 @@ services:
       retries: 3
       # Long start_period: model loading at boot takes 60-120s on CPU
       start_period: 180s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "3"
-
-  # ---------------------------------------------------------------------------
-  # Watchtower — Update Monitor (notification only, NO auto-update)
-  # ---------------------------------------------------------------------------
-  watchtower:
-    image: docker.io/nickfedor/watchtower:latest
-    container_name: watchtower
-    restart: unless-stopped
-    environment:
-      TZ: Asia/Kolkata
-      WATCHTOWER_MONITOR_ONLY: "true"
-      WATCHTOWER_POLL_INTERVAL: "86400"
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_DEBUG: "false"
-      WATCHTOWER_CLEANUP: "false"
-      # --- Notifications (configure after n8n is stable) ---
-      # Option A: Email
-      # WATCHTOWER_NOTIFICATIONS: email
-      # WATCHTOWER_NOTIFICATION_EMAIL_FROM: watchtower@iitbacr.space
-      # WATCHTOWER_NOTIFICATION_EMAIL_TO: admin@iitbacr.space
-      #
-      # Option B: n8n webhook
-      # WATCHTOWER_NOTIFICATIONS: shoutrrr
-      # WATCHTOWER_NOTIFICATION_URL: generic+https://n8n.iitbacr.space/webhook/watchtower
-    user: root
-    security_opt:
-      - label=disable
-    volumes:
-      - ${PODMAN_SOCKET}:/var/run/docker.sock:ro
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
-    deploy:
-      resources:
-        limits:
-          memory: 128m
-          cpus: "0.1"
-    logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "2"
