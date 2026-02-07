@@ -47,46 +47,9 @@ else
     echo "  Enable: Add 'systemd.unified_cgroup_hierarchy=1' to kernel params"
 fi
 
-# --- Step 1: Detect Podman Socket ---
+# --- Step 1: Create Directory Structure ---
 echo ""
-echo "--- Step 1: Detecting Podman socket ---"
-
-PODMAN_SOCKET=""
-
-# Check rootful socket first (production servers typically use rootful)
-if [ -S "/run/podman/podman.sock" ]; then
-    PODMAN_SOCKET="/run/podman/podman.sock"
-    log "Rootful Podman socket found: $PODMAN_SOCKET"
-# Check rootless socket
-elif [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" ]; then
-    PODMAN_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
-    log "Rootless Podman socket found: $PODMAN_SOCKET"
-else
-    warn "No Podman socket found. Enabling it now..."
-    if [ "$(id -u)" -eq 0 ]; then
-        systemctl enable --now podman.socket
-        PODMAN_SOCKET="/run/podman/podman.sock"
-    else
-        systemctl --user enable --now podman.socket
-        PODMAN_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
-        # Ensure user session persists after logout (needed for rootless)
-        loginctl enable-linger "$(whoami)" 2>/dev/null || true
-    fi
-
-    if [ -S "$PODMAN_SOCKET" ]; then
-        log "Podman socket enabled: $PODMAN_SOCKET"
-    else
-        warn "Could not enable Podman socket automatically."
-        echo "  Manual fix (rootful):  sudo systemctl enable --now podman.socket"
-        echo "  Manual fix (rootless): systemctl --user enable --now podman.socket"
-        echo "  Watchtower will not work without the socket, but n8n will."
-        PODMAN_SOCKET="/run/podman/podman.sock"  # Default, fix later
-    fi
-fi
-
-# --- Step 2: Create Directory Structure ---
-echo ""
-echo "--- Step 2: Creating directory structure ---"
+echo "--- Step 1: Creating directory structure ---"
 sudo mkdir -p "$DEPLOY_DIR"/{postgres/data,postgres/init,n8n/data,runners,redis/data,docling/{hf-cache,models,documents}}
 sudo chown -R "$(id -u):$(id -g)" "$DEPLOY_DIR"
 # n8n container runs as user "node" (UID 1000). The data directory must be
@@ -94,9 +57,9 @@ sudo chown -R "$(id -u):$(id -g)" "$DEPLOY_DIR"
 sudo chown -R 1000:1000 "$DEPLOY_DIR/n8n/data"
 log "Created $DEPLOY_DIR"
 
-# --- Step 3: Copy Configuration Files ---
+# --- Step 2: Copy Configuration Files ---
 echo ""
-echo "--- Step 3: Copying configuration files ---"
+echo "--- Step 2: Copying configuration files ---"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cp "$SCRIPT_DIR/docker-compose.yml"              "$DEPLOY_DIR/"
@@ -107,14 +70,16 @@ cp "$SCRIPT_DIR/runners/Dockerfile"               "$DEPLOY_DIR/runners/"
 cp "$SCRIPT_DIR/runners/n8n-task-runners.json"    "$DEPLOY_DIR/runners/"
 cp "$SCRIPT_DIR/redis/redis.conf"                 "$DEPLOY_DIR/redis/"
 cp "$SCRIPT_DIR/docling/download-models.sh"       "$DEPLOY_DIR/docling/"
+cp "$SCRIPT_DIR/check-updates.sh"                 "$DEPLOY_DIR/"
 
 chmod 600 "$DEPLOY_DIR/.env"
 chmod +x "$DEPLOY_DIR/docling/download-models.sh"
+chmod +x "$DEPLOY_DIR/check-updates.sh"
 log "All config files copied"
 
-# --- Step 4: Generate Secrets & Configure Socket ---
+# --- Step 3: Generate Secrets ---
 echo ""
-echo "--- Step 4: Generating secrets ---"
+echo "--- Step 3: Generating secrets ---"
 
 DB_PASS=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
 ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
@@ -125,18 +90,29 @@ sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|"             "$DEPLOY_DIR/.env
 sed -i "s|^N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}|" "$DEPLOY_DIR/.env"
 sed -i "s|^RUNNERS_AUTH_TOKEN=.*|RUNNERS_AUTH_TOKEN=${RUNNER_TOKEN}|"   "$DEPLOY_DIR/.env"
 sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${REDIS_PASS}|"           "$DEPLOY_DIR/.env"
-sed -i "s|^PODMAN_SOCKET=.*|PODMAN_SOCKET=${PODMAN_SOCKET}|"          "$DEPLOY_DIR/.env"
 
-log "Secrets generated and socket path configured"
+log "Secrets generated"
 warn "IMPORTANT — Save these somewhere secure (e.g., AWS Secrets Manager):"
 echo ""
 echo "  DB_PASSWORD        = ${DB_PASS}"
 echo "  N8N_ENCRYPTION_KEY = ${ENCRYPTION_KEY}"
 echo "  RUNNERS_AUTH_TOKEN = ${RUNNER_TOKEN}"
 echo "  REDIS_PASSWORD     = ${REDIS_PASS}"
-echo "  PODMAN_SOCKET      = ${PODMAN_SOCKET}"
 echo ""
 warn "The encryption key is critical — losing it means losing access to all stored credentials in n8n."
+
+# --- Step 4: Install Update-Check Timer ---
+echo ""
+echo "--- Step 4: Installing daily image update-check timer ---"
+
+sudo cp "$SCRIPT_DIR/systemd/n8n-check-updates.service" /etc/systemd/system/
+sudo cp "$SCRIPT_DIR/systemd/n8n-check-updates.timer"   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now n8n-check-updates.timer
+
+log "Systemd timer installed (checks for image updates daily)"
+echo "  View results: journalctl -u n8n-check-updates.service --since today"
+echo "  Run now:      sudo systemctl start n8n-check-updates.service"
 
 # --- Step 5: Build and Launch ---
 echo ""
@@ -172,8 +148,8 @@ $COMPOSE up -d n8n
 echo "Waiting 20s for n8n to start..."
 sleep 20
 
-log "Starting task runners, Docling Serve, and watchtower..."
-$COMPOSE up -d n8n-runners docling watchtower
+log "Starting task runners and Docling Serve..."
+$COMPOSE up -d n8n-runners docling
 
 # --- Step 6: Verify ---
 echo ""
@@ -184,7 +160,7 @@ $COMPOSE ps
 echo ""
 
 log "Container health status:"
-for svc in n8n-postgres n8n-redis n8n n8n-runners n8n-docling watchtower; do
+for svc in n8n-postgres n8n-redis n8n n8n-runners n8n-docling; do
     status=$(podman inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo "not found")
     health=$(podman inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "N/A")
     if [ "$status" = "running" ]; then
@@ -222,7 +198,8 @@ echo "  Status:        cd $DEPLOY_DIR && $COMPOSE ps"
 echo "  Resources:     podman stats --no-stream"
 echo "  Stop:          cd $DEPLOY_DIR && $COMPOSE down"
 echo ""
-echo "  Update check:  $COMPOSE logs watchtower"
+echo "  Update check:  journalctl -u n8n-check-updates.service --since today"
+echo "  Run check now: sudo systemctl start n8n-check-updates.service"
 echo "  Manual update:"
 echo "    $COMPOSE pull n8n"
 echo "    $COMPOSE up -d n8n"

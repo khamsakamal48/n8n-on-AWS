@@ -1,0 +1,8 @@
+[Unit]
+Description=Check for n8n stack container image updates
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/n8n-production/check-updates.sh

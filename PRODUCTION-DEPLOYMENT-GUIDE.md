@@ -4,7 +4,7 @@
 - **Instance:** AWS EC2 t3.xlarge (4 vCPU, 16 GB RAM)
 - **Container runtime:** Podman with podman-compose
 - **Workload:** 10–50 concurrent n8n workflows with AI agents
-- **Services:** n8n, PostgreSQL 16, Redis 7, n8n Task Runners (JS + Python), Docling Serve (document API), Watchtower (monitor)
+- **Services:** n8n, PostgreSQL 16, Redis 7, n8n Task Runners (JS + Python), Docling Serve (document API)
 
 ---
 
@@ -16,8 +16,7 @@ This stack is written specifically for Podman. Key differences from Docker:
 |---------|----------------|---------------------|
 | Volume driver_opts | Supported | **Not supported** — uses direct bind mounts |
 | depends_on + service_healthy | Works | **Broken** — uses simple depends_on + restart policy |
-| Container socket | /var/run/docker.sock | Auto-detected rootful/rootless Podman socket |
-| Watchtower image | containrrr/watchtower | **nickfedor/watchtower** (maintained fork) |
+| Image update checks | Watchtower container | **systemd timer** + `check-updates.sh` (Podman-native) |
 | Resource limits (deploy) | Supported | Supported (cgroups v2 required) |
 | SELinux labels (:Z) | Optional | Required on SELinux-enabled hosts |
 
@@ -25,11 +24,6 @@ This stack is written specifically for Podman. Key differences from Docker:
 ```bash
 # Verify cgroups v2 (required for memory/CPU limits)
 mount | grep cgroup2
-
-# Enable Podman socket (required for Watchtower)
-sudo systemctl enable --now podman.socket   # rootful
-# or
-systemctl --user enable --now podman.socket  # rootless
 ```
 
 ---
@@ -43,7 +37,6 @@ systemctl --user enable --now podman.socket  # rootless
 | Redis | 768 MB | 0.3 CPU | In-memory chat history + 512MB maxmemory cap |
 | n8n (main) | 6 GB | 1.5 CPU | Node.js heap(4GB) + native allocations |
 | n8n Task Runners | 3 GB | 1.0 CPU | Python/JS code execution (pandas/numpy) |
-| Watchtower | 128 MB | 0.1 CPU | Lightweight image checker |
 | Docling Serve | *uncapped* | *uncapped* | Limits commented out — enable after tuning |
 | Safety margin | ~0.6 GB | — | Prevents OOM kills during peak |
 
@@ -55,9 +48,10 @@ systemctl --user enable --now podman.socket  # rootless
 
 ```
 /opt/n8n-production/
-├── docker-compose.yml          # Main orchestration (6 services)
-├── .env                        # Secrets + socket path (chmod 600)
+├── docker-compose.yml          # Main orchestration (5 services)
+├── .env                        # Secrets (chmod 600)
 ├── deploy.sh                   # Automated deployment script
+├── check-updates.sh            # Image update checker (runs via systemd timer)
 ├── postgres/
 │   ├── postgresql.conf         # Production PG tuning
 │   ├── init/
@@ -70,11 +64,14 @@ systemctl --user enable --now podman.socket  # rootless
 ├── runners/
 │   ├── Dockerfile              # Custom runners image
 │   └── n8n-task-runners.json   # Runner config
-└── docling/
-    ├── download-models.sh      # Pre-download VLM models (run after deploy)
-    ├── hf-cache/               # HuggingFace model cache (auto-populated)
-    ├── models/                 # Docling pipeline model artifacts
-    └── documents/              # Shared document I/O directory
+├── docling/
+│   ├── download-models.sh      # Pre-download VLM models (run after deploy)
+│   ├── hf-cache/               # HuggingFace model cache (auto-populated)
+│   ├── models/                 # Docling pipeline model artifacts
+│   └── documents/              # Shared document I/O directory
+└── systemd/
+    ├── n8n-check-updates.service  # Oneshot service for update checks
+    └── n8n-check-updates.timer    # Daily timer trigger
 ```
 
 ---
@@ -96,7 +93,7 @@ cd /opt/n8n-production
 ./docling/download-models.sh
 ```
 
-The script handles: socket detection, secret generation, directory setup, staged startup (PG + Redis → n8n → runners + Docling + watchtower), and health verification.
+The script handles: secret generation, directory setup, systemd timer installation, staged startup (PG + Redis → n8n → runners + Docling), and health verification.
 
 ---
 
@@ -249,11 +246,19 @@ du -sh /opt/n8n-production/docling/models/
 
 ## Update Workflow
 
-Watchtower runs in **monitor-only mode** — it checks for new images daily and logs findings but never auto-updates.
+A systemd timer (`n8n-check-updates.timer`) runs `check-updates.sh` daily. The script
+pulls the latest image tags, compares them against the running containers, and logs
+results to the systemd journal. It never auto-updates — you apply updates manually.
 
 ```bash
-# Check for available updates
-podman-compose logs watchtower
+# Check for available updates (view last check results)
+journalctl -u n8n-check-updates.service --since today
+
+# Run update check on demand
+sudo systemctl start n8n-check-updates.service
+
+# Timer status
+systemctl status n8n-check-updates.timer
 
 # Update a specific service
 cd /opt/n8n-production
