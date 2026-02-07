@@ -1,10 +1,20 @@
 # =============================================================================
 # n8n Production Stack — AWS EC2 t3.xlarge (4 vCPU, 16 GB RAM)
 # =============================================================================
+# Fully Podman-compatible (tested against podman-compose 1.x)
+#
 # Usage:
 #   podman-compose up -d
 #   podman-compose logs -f
 #   podman-compose down
+#
+# Podman compatibility notes:
+#   - Direct bind mounts instead of named volumes with driver_opts
+#     (driver_opts is silently ignored by podman-compose)
+#   - Simple depends_on (no condition: service_healthy)
+#     (broken in podman-compose; services handle retries internally)
+#   - nickfedor/watchtower (maintained fork of archived containrrr/watchtower)
+#   - Podman socket path configurable via PODMAN_SOCKET env var
 # =============================================================================
 
 version: "3.8"
@@ -12,20 +22,6 @@ version: "3.8"
 networks:
   n8n-net:
     driver: bridge
-
-volumes:
-  postgres-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/postgres/data
-  n8n-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/n8n/data
 
 services:
   # ---------------------------------------------------------------------------
@@ -36,14 +32,13 @@ services:
   # Key tuning: shared_buffers=1GB, work_mem=32MB, max_connections=60
   # ---------------------------------------------------------------------------
   postgres:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:latest
     container_name: n8n-postgres
     restart: unless-stopped
     networks:
       - n8n-net
     # NOTE: No port mapping — PostgreSQL is only accessible within n8n-net
-    # If you need external access for debugging, temporarily add:
-    #   ports: ["127.0.0.1:5432:5432"]
+    # For debugging, temporarily add:  ports: ["127.0.0.1:5432:5432"]
     environment:
       TZ: Asia/Kolkata
       POSTGRES_USER: ${DB_USER}
@@ -51,10 +46,10 @@ services:
       POSTGRES_DB: ${DB_NAME}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - postgres-data:/var/lib/postgresql/data:Z
+      # Direct bind mounts (podman-compose ignores driver_opts on named volumes)
+      - ./postgres/data:/var/lib/postgresql/data:Z
       - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro,Z
-      # Scripts in docker-entrypoint-initdb.d/ run ONLY on first initialization
-      # (when data directory is empty). Safe to leave mounted permanently.
+      # Init scripts run ONLY on first boot (empty data dir). Safe to keep mounted.
       - ./postgres/init:/docker-entrypoint-initdb.d:ro,Z
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     deploy:
@@ -85,9 +80,13 @@ services:
   # Memory budget: 6 GB (of 16 GB total)
   # CPU budget: 1.5 cores (of 4 total)
   # Node.js heap: 4096 MB (within 6 GB container limit)
+  #
+  # Startup: n8n retries DB connection internally on launch (built-in).
+  # With restart: unless-stopped, even if PG isn't ready, n8n will
+  # restart and successfully connect once PG is healthy.
   # ---------------------------------------------------------------------------
   n8n:
-    image: docker.n8n.io/n8nio/n8n:1.91.3
+    image: docker.n8n.io/n8nio/n8n:stable
     container_name: n8n
     restart: unless-stopped
     networks:
@@ -97,8 +96,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      postgres:
-        condition: service_healthy
+      - postgres
     environment:
       # --- Timezone ---
       TZ: Asia/Kolkata
@@ -112,8 +110,6 @@ services:
       DB_POSTGRESDB_USER: ${DB_USER}
       DB_POSTGRESDB_PASSWORD: ${DB_PASSWORD}
       DB_POSTGRESDB_SCHEMA: public
-      # Connection pooling — match PG max_connections budget
-      # n8n uses TypeORM; this controls pool size
       DB_POSTGRESDB_POOL_SIZE: "20"
 
       # --- Hosting ---
@@ -127,7 +123,6 @@ services:
 
       # --- Node.js Performance ---
       # 4 GB heap within 6 GB container limit
-      # Leaves ~2 GB for native allocations, buffers, and overhead
       NODE_OPTIONS: "--max-old-space-size=4096"
 
       # --- Task Runners (External Mode) ---
@@ -137,8 +132,7 @@ services:
       N8N_RUNNERS_AUTH_TOKEN: ${RUNNERS_AUTH_TOKEN}
       N8N_NATIVE_PYTHON_RUNNER: "true"
 
-      # --- Execution Settings ---
-      # Prune old executions to prevent DB bloat
+      # --- Execution Pruning ---
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: "336"  # 14 days
       EXECUTIONS_DATA_PRUNE_MAX_COUNT: "50000"
@@ -147,10 +141,10 @@ services:
       N8N_LOG_LEVEL: warn
       N8N_LOG_OUTPUT: console
 
-      # --- Diagnostics (optional, disable if not wanted) ---
+      # --- Diagnostics ---
       N8N_DIAGNOSTICS_ENABLED: "false"
     volumes:
-      - n8n-data:/home/node/.n8n:Z
+      - ./n8n/data:/home/node/.n8n:Z
     deploy:
       resources:
         limits:
@@ -178,7 +172,9 @@ services:
   # ---------------------------------------------------------------------------
   # Memory budget: 3 GB (of 16 GB total)
   # CPU budget: 1.0 core (of 4 total)
-  # Handles Code node execution isolated from main n8n process
+  #
+  # Startup: Runner auto-retries broker connection. If n8n isn't ready,
+  # restart policy handles reconnection.
   # ---------------------------------------------------------------------------
   n8n-runners:
     build:
@@ -190,8 +186,7 @@ services:
     networks:
       - n8n-net
     depends_on:
-      n8n:
-        condition: service_healthy
+      - n8n
     environment:
       N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
       N8N_RUNNERS_AUTH_TOKEN: ${RUNNERS_AUTH_TOKEN}
@@ -224,36 +219,35 @@ services:
   # ---------------------------------------------------------------------------
   # Watchtower — Update Monitor (notification only, NO auto-update)
   # ---------------------------------------------------------------------------
-  # Checks for new images every 24 hours and logs when updates are available.
-  # Does NOT automatically pull or restart containers.
+  # nickfedor/watchtower — actively maintained fork of the archived
+  # containrrr/watchtower (archived Dec 2025, incompatible with newer APIs).
+  # Drop-in replacement: same config, same env vars, just a different image.
   #
-  # To manually update after seeing a notification in logs:
-  #   cd /opt/n8n-production
-  #   podman-compose pull n8n          # or postgres, n8n-runners
-  #   podman-compose up -d n8n         # recreate with new image
+  # Checks labeled containers every 24h and logs when updates are available.
+  # Does NOT auto-pull or restart.
   #
-  # Why NOT auto-update:
-  #   - n8n minor versions can introduce breaking workflow changes
-  #   - PostgreSQL major upgrades require pg_upgrade, not image swap
-  #   - You want to test updates against your workflows first
+  # Manual update workflow:
+  #   podman-compose pull n8n
+  #   podman-compose up -d n8n
   # ---------------------------------------------------------------------------
   watchtower:
-    image: docker.io/containrrr/watchtower:latest
+    image: docker.io/nickfedor/watchtower:latest
     container_name: watchtower
     restart: unless-stopped
     environment:
       TZ: Asia/Kolkata
       WATCHTOWER_MONITOR_ONLY: "true"
-      WATCHTOWER_POLL_INTERVAL: "86400"       # Check every 24 hours
-      WATCHTOWER_LABEL_ENABLE: "true"         # Only watch labeled containers
+      WATCHTOWER_POLL_INTERVAL: "86400"
+      WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_DEBUG: "false"
       WATCHTOWER_CLEANUP: "false"
-      # --- Notifications (uncomment ONE option) ---
-      # Option A: Email
+      # --- Notifications (configure later, after n8n is stable) ---
+      #
+      # Option A: Email (if you have SMTP)
       # WATCHTOWER_NOTIFICATIONS: email
       # WATCHTOWER_NOTIFICATION_EMAIL_FROM: watchtower@iitbacr.space
       # WATCHTOWER_NOTIFICATION_EMAIL_TO: your-email@iitbacr.space
-      # WATCHTOWER_NOTIFICATION_EMAIL_SERVER: smtp.example.com
+      # WATCHTOWER_NOTIFICATION_EMAIL_SERVER: smtp.iitbacr.space
       # WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT: "587"
       # WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER: user
       # WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD: pass
@@ -263,11 +257,14 @@ services:
       # WATCHTOWER_NOTIFICATION_SLACK_HOOK_URL: https://hooks.slack.com/services/xxx
       # WATCHTOWER_NOTIFICATION_SLACK_CHANNEL: "#infra-alerts"
       #
-      # Option C: Generic webhook (works with n8n too!)
+      # Option C: n8n webhook (set up after n8n is running)
       # WATCHTOWER_NOTIFICATIONS: shoutrrr
       # WATCHTOWER_NOTIFICATION_URL: generic+https://n8n.iitbacr.space/webhook/watchtower
     volumes:
-      - /run/podman/podman.sock:/var/run/docker.sock:ro
+      # Podman socket path — auto-detected by deploy.sh and written to .env
+      # Rootful:  /run/podman/podman.sock
+      # Rootless: /run/user/<UID>/podman/podman.sock
+      - ${PODMAN_SOCKET}:/var/run/docker.sock:ro
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     deploy:
