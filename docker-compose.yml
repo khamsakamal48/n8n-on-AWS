@@ -474,6 +474,9 @@ services:
       # Option B: n8n webhook
       # WATCHTOWER_NOTIFICATIONS: shoutrrr
       # WATCHTOWER_NOTIFICATION_URL: generic+https://n8n.iitbacr.space/webhook/watchtower
+    user: root
+    security_opt:
+      - label=disable
     volumes:
       - ${PODMAN_SOCKET}:/var/run/docker.sock:ro
     labels:
