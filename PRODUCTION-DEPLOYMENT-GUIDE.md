@@ -314,3 +314,22 @@ aws cloudwatch get-metric-statistics \
 - Memory utilization > 85%
 - Disk utilization > 80%
 - Container restart count > 0 in 5 minutes
+
+## Troubleshooting
+
+### n8n crashes with `EACCES: permission denied, open '/home/node/.n8n/config'`
+
+The n8n container runs as user `node` (UID 1000). If the host directory `./n8n/data`
+is owned by root or another user, n8n cannot write its config file.
+
+**Fix for existing deployments:**
+```bash
+sudo chown -R 1000:1000 ./n8n/data
+```
+
+Then restart n8n:
+```bash
+podman-compose restart n8n
+```
+
+The `deploy.sh` script handles this automatically for fresh deployments.

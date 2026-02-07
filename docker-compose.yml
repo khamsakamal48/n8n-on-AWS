@@ -248,6 +248,10 @@ services:
 
       # --- Diagnostics ---
       N8N_DIAGNOSTICS_ENABLED: "false"
+    # n8n runs as user "node" (UID 1000) inside the container.
+    # The data directory must be owned by 1000:1000 on the host:
+    #   sudo chown -R 1000:1000 ./n8n/data
+    user: "1000:1000"
     volumes:
       - ./n8n/data:/home/node/.n8n:Z
     deploy:
