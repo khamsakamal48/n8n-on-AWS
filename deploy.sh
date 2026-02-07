@@ -55,6 +55,9 @@ sudo chown -R "$(id -u):$(id -g)" "$DEPLOY_DIR"
 # n8n container runs as user "node" (UID 1000). The data directory must be
 # writable by this UID, otherwise n8n fails with EACCES on /home/node/.n8n/config.
 sudo chown -R 1000:1000 "$DEPLOY_DIR/n8n/data"
+# Docling container runs as user "default" (UID 1001). Cache directories must
+# be writable by this UID, otherwise model downloads fail with Permission denied.
+sudo chown -R 1001:0 "$DEPLOY_DIR/docling/hf-cache" "$DEPLOY_DIR/docling/models"
 log "Created $DEPLOY_DIR"
 
 # --- Step 2: Copy Configuration Files ---

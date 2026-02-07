@@ -43,6 +43,19 @@ echo " Docling Model Download — CPU-only models"
 echo "============================================="
 echo ""
 
+# --- Step 0: Fix cache directory permissions ---
+# The container runs as user "default" (UID 1001). Mounted host volumes
+# may be owned by root or the deploy user, causing "Permission denied"
+# when HuggingFace tries to create subdirectories (hub/, xet/logs/, etc.).
+log "Ensuring cache directories are writable by container user..."
+podman exec --user 0 "$CONTAINER" sh -c '
+    mkdir -p /home/default/.cache/huggingface/hub \
+             /home/default/.cache/huggingface/xet/logs \
+             /home/default/.cache/docling/models
+    chown -R $(id -u default):0 /home/default/.cache/huggingface \
+                                /home/default/.cache/docling
+' || warn "Could not fix cache directory permissions — downloads may fail"
+
 # --- Step 1: Download default pipeline models ---
 log "Downloading default pipeline models (layout, tableformer, OCR, etc.)..."
 podman exec "$CONTAINER" docling-tools models download || {
