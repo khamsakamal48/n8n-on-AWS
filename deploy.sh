@@ -102,6 +102,7 @@ cp "$SCRIPT_DIR/postgres/postgresql.conf"         "$DEPLOY_DIR/postgres/"
 cp "$SCRIPT_DIR/postgres/init/01-init-n8n.sql"    "$DEPLOY_DIR/postgres/init/"
 cp "$SCRIPT_DIR/runners/Dockerfile"               "$DEPLOY_DIR/runners/"
 cp "$SCRIPT_DIR/runners/n8n-task-runners.json"    "$DEPLOY_DIR/runners/"
+cp "$SCRIPT_DIR/redis/redis.conf"                 "$DEPLOY_DIR/redis/"
 cp "$SCRIPT_DIR/docling/download-models.sh"       "$DEPLOY_DIR/docling/"
 
 chmod 600 "$DEPLOY_DIR/.env"
