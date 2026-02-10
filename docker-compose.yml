@@ -225,6 +225,7 @@ services:
       NODE_OPTIONS: "--max-old-space-size=4096"
 
       # --- Task Runners (External Mode) ---
+      N8N_RUNNERS_ENABLED: "true"
       N8N_RUNNERS_MODE: external
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: "0.0.0.0"
       N8N_RUNNERS_AUTH_TOKEN: ${RUNNERS_AUTH_TOKEN}
