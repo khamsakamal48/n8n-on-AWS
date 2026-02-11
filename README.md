@@ -186,6 +186,60 @@ sudo systemctl start n8n-check-updates.service
 journalctl -u n8n-check-updates.service --since today
 ```
 
+### Restarting Individual Services
+
+When updating or troubleshooting services, use one of these safe restart methods:
+
+**Option 1: Use the restart wrapper (recommended)**
+```bash
+cd /opt/n8n-production
+./restart-service.sh n8n-runners
+```
+
+**Option 2: Use systemd for full stack restart**
+```bash
+sudo systemctl restart n8n-stack.service
+```
+
+**Option 3: Manual restart with cleanup**
+```bash
+# Stop the service
+podman stop n8n-runners
+
+# Remove the stopped container
+podman rm n8n-runners
+
+# Recreate with latest image
+podman-compose up -d n8n-runners
+```
+
+**Important:** Avoid running `podman-compose up -d <service>` on a stopped container without removing it first. This will cause name conflict errors.
+
+### Troubleshooting: Container Name Conflicts
+
+**Symptom:**
+```
+Error: creating container storage: the container name "n8n-postgres" is already in use
+```
+
+**Cause:** This happens when containers are stopped but not removed, and you try to run `podman-compose up -d <service>`.
+
+**Quick Fix:**
+```bash
+# Remove all stopped n8n containers
+podman ps -a --filter "name=n8n-" --filter "status=exited" --format "{{.Names}}" | xargs -r podman rm
+
+# Then restart
+cd /opt/n8n-production
+podman-compose up -d
+```
+
+**Or use the safe restart script:**
+```bash
+cd /opt/n8n-production
+./restart-service.sh all
+```
+
 ## Documentation
 
 See [PRODUCTION-DEPLOYMENT-GUIDE.md](PRODUCTION-DEPLOYMENT-GUIDE.md) for detailed documentation on:
