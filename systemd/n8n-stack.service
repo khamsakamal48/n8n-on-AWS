@@ -15,6 +15,12 @@ WorkingDirectory=/opt/n8n-production
 User=__DEPLOY_USER__
 Group=__DEPLOY_GROUP__
 
+# Rootless Podman needs XDG_RUNTIME_DIR to find its runtime socket and config.
+# When started via 'sudo systemctl', the user's login session isn't active, so
+# /run/user/<UID> isn't set automatically. %U = numeric UID of the User= above.
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+
 # Ensure .env is readable by the service user before podman-compose tries to parse it.
 # The '+' prefix runs this command with full (root) privileges regardless of User=,
 # so the chown always succeeds. This self-heals ownership after 'sudo vi .env' or

@@ -84,6 +84,11 @@ log "Configuring service to run as user: $CURRENT_USER (group: $CURRENT_GROUP)"
 sed "s/__DEPLOY_USER__/${CURRENT_USER}/g; s/__DEPLOY_GROUP__/${CURRENT_GROUP}/g" \
     "$SERVICE_FILE" | sudo tee /etc/systemd/system/n8n-stack.service >/dev/null
 
+# Enable lingering so /run/user/<UID> is created at boot (not just on login).
+# Rootless Podman needs this directory for its runtime socket and storage.
+sudo loginctl enable-linger "$CURRENT_USER"
+log "Enabled linger for $CURRENT_USER (ensures /run/user/$(id -u) exists at boot)"
+
 log "Reloading systemd daemon..."
 sudo systemctl daemon-reload
 
