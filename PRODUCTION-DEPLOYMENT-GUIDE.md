@@ -70,8 +70,9 @@ mount | grep cgroup2
 │   ├── models/                 # Docling pipeline model artifacts
 │   └── documents/              # Shared document I/O directory
 └── systemd/
-    ├── n8n-check-updates.service  # Oneshot service for update checks
-    └── n8n-check-updates.timer    # Daily timer trigger
+    ├── n8n-stack.service             # Auto-start service (starts on boot)
+    ├── n8n-check-updates.service     # Oneshot service for update checks
+    └── n8n-check-updates.timer       # Daily timer trigger
 ```
 
 ---
@@ -102,7 +103,7 @@ The script handles: secret generation, directory setup, systemd timer installati
 Since `depends_on: condition: service_healthy` is broken in podman-compose, startup order is handled by:
 
 1. **deploy.sh** starts services sequentially with wait pauses
-2. **restart: unless-stopped** ensures services that start before dependencies are ready will automatically retry
+2. **restart: always** ensures services that start before dependencies are ready will automatically retry
 3. **n8n** has built-in DB connection retry logic
 4. **n8n-runners** auto-reconnects to the broker
 5. **Redis** and **Docling Serve** are independent services — no ordering dependencies
