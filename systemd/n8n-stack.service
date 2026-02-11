@@ -15,6 +15,12 @@ WorkingDirectory=/opt/n8n-production
 User=__DEPLOY_USER__
 Group=__DEPLOY_GROUP__
 
+# Ensure .env is readable by the service user before podman-compose tries to parse it.
+# The '+' prefix runs this command with full (root) privileges regardless of User=,
+# so the chown always succeeds. This self-heals ownership after 'sudo vi .env' or
+# similar root-owned edits that would otherwise cause a PermissionError.
+ExecStartPre=+/bin/chown __DEPLOY_USER__:__DEPLOY_GROUP__ /opt/n8n-production/.env
+
 # Start all services in the correct order (dependencies handled by docker-compose.yml)
 # podman-compose reads .env from the WorkingDirectory automatically
 ExecStart=/usr/bin/podman-compose up -d
