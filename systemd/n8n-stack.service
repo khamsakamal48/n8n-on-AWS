@@ -21,6 +21,15 @@ Group=__DEPLOY_GROUP__
 # similar root-owned edits that would otherwise cause a PermissionError.
 ExecStartPre=+/bin/chown __DEPLOY_USER__:__DEPLOY_GROUP__ /opt/n8n-production/.env
 
+# Clean up any stopped containers before starting
+# This prevents name conflicts when restarting the service after manual podman stop
+ExecStartPre=/bin/bash -c 'for container in n8n-postgres n8n-redis n8n n8n-runners n8n-docling; do \
+  if /usr/bin/podman ps -a --filter "name=^$container$$" --format "{{.Names}} {{.State}}" | grep -q "exited\\|stopped"; then \
+    echo "Cleaning up stopped container: $container"; \
+    /usr/bin/podman rm $container 2>/dev/null || true; \
+  fi; \
+done'
+
 # Start all services in the correct order (dependencies handled by docker-compose.yml)
 # podman-compose reads .env from the WorkingDirectory automatically
 ExecStart=/usr/bin/podman-compose up -d

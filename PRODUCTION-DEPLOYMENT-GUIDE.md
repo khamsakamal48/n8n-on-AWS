@@ -339,3 +339,83 @@ podman-compose restart n8n
 ```
 
 The `deploy.sh` script handles this automatically for fresh deployments.
+
+### Container Name Conflicts During Restart
+
+**Symptom:**
+```
+Error: creating container storage: the container name "n8n-postgres" is already in use
+Error: creating container storage: the container name "n8n-redis" is already in use
+```
+
+**Root Cause:**
+
+This error occurs when you run `podman-compose up -d <service>` and the target service has dependencies (defined in `depends_on`) whose containers exist in a stopped state. Podman-compose tries to create the entire dependency tree, but Podman refuses to create containers with names that already exist, even if they're stopped.
+
+**Why this differs from Docker:**
+Docker Compose automatically reuses stopped containers with the same name. Podman requires explicit cleanup or the `--replace` flag (not available in podman-compose).
+
+**Affected workflows:**
+- Updating a single service: `podman-compose pull n8n && podman-compose up -d n8n`
+- Restarting after manual stop: `podman stop n8n-runners && podman-compose up -d n8n-runners`
+- Troubleshooting individual services
+
+**Prevention:**
+
+**1. Use systemd for orchestrated restarts (safest):**
+```bash
+sudo systemctl restart n8n-stack.service
+```
+The systemd service now includes automatic cleanup of stopped containers before starting.
+
+**2. Use the safe restart script:**
+```bash
+cd /opt/n8n-production
+./restart-service.sh n8n-runners    # Restart specific service
+./restart-service.sh all            # Restart all services
+```
+
+**3. Use down/up cycle (removes all containers):**
+```bash
+cd /opt/n8n-production
+podman-compose down --timeout 60
+podman-compose up -d
+```
+
+**Manual Fix:**
+
+If you encounter this error, clean up stopped containers:
+
+```bash
+# Check container states
+podman ps -a | grep n8n
+
+# Remove specific stopped container
+podman rm n8n-postgres
+
+# Or remove all stopped n8n containers
+podman ps -a --filter "name=n8n-" --filter "status=exited" --format "{{.Names}}" | xargs -r podman rm
+
+# Then restart
+podman-compose up -d
+```
+
+**Update workflow (recommended):**
+
+When updating a service, use this sequence:
+```bash
+cd /opt/n8n-production
+
+# Pull new image
+podman-compose pull n8n
+
+# Stop and remove container explicitly
+podman stop n8n
+podman rm n8n
+
+# Recreate with new image
+podman-compose up -d n8n
+
+# Or use the restart script
+./restart-service.sh n8n
+```
