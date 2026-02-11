@@ -15,10 +15,8 @@ WorkingDirectory=/opt/n8n-production
 User=__DEPLOY_USER__
 Group=__DEPLOY_GROUP__
 
-# Environment file contains secrets (DB passwords, encryption keys, etc.)
-EnvironmentFile=/opt/n8n-production/.env
-
 # Start all services in the correct order (dependencies handled by docker-compose.yml)
+# podman-compose reads .env from the WorkingDirectory automatically
 ExecStart=/usr/bin/podman-compose up -d
 
 # Graceful shutdown: stop containers in reverse dependency order
