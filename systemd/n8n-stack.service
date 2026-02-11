@@ -1,0 +1,47 @@
+[Unit]
+Description=n8n Production Stack (Podman Compose)
+Documentation=https://github.com/khamsakamal48/n8n-on-AWS
+Requires=network-online.target
+After=network-online.target
+# Ensure podman.socket is available for rootless podman
+Wants=podman.socket
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/n8n-production
+# Environment file contains secrets (DB passwords, encryption keys, etc.)
+EnvironmentFile=/opt/n8n-production/.env
+
+# Start all services in the correct order (dependencies handled by docker-compose.yml)
+ExecStart=/usr/bin/podman-compose up -d
+
+# Graceful shutdown: stop containers in reverse dependency order
+# --timeout 60 gives services time to flush data and close connections
+ExecStop=/usr/bin/podman-compose down --timeout 60
+
+# Restart policy: always restart if the service fails
+Restart=on-failure
+RestartSec=10s
+
+# Security hardening
+# Prevent privilege escalation
+NoNewPrivileges=true
+# Limit file system access to minimal required paths
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/n8n-production
+
+# Resource limits (prevent runaway processes from exhausting system)
+# These are SYSTEMD service limits, NOT container limits
+# Container limits are defined in docker-compose.yml
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=n8n-stack
+
+[Install]
+WantedBy=multi-user.target
