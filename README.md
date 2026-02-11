@@ -134,7 +134,7 @@ A systemd timer runs daily to check for new container image versions. Updates ar
 
 ### Auto-Start on Boot
 
-The stack is configured to start automatically on system boot via systemd:
+The stack is configured to start automatically on system boot via systemd. The service runs as the user who deployed the containers (determined automatically during installation) to ensure proper access to rootless Podman storage.
 
 ```bash
 # Check auto-start status

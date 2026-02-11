@@ -75,7 +75,14 @@ echo ""
 # --- Install Service ---
 
 log "Installing systemd service..."
-sudo cp "$SERVICE_FILE" /etc/systemd/system/n8n-stack.service
+# Substitute the current user and group into the service file
+# This ensures the service runs as the same user who deployed the containers
+CURRENT_USER="$(id -un)"
+CURRENT_GROUP="$(id -gn)"
+
+log "Configuring service to run as user: $CURRENT_USER (group: $CURRENT_GROUP)"
+sed "s/__DEPLOY_USER__/${CURRENT_USER}/g; s/__DEPLOY_GROUP__/${CURRENT_GROUP}/g" \
+    "$SERVICE_FILE" | sudo tee /etc/systemd/system/n8n-stack.service >/dev/null
 
 log "Reloading systemd daemon..."
 sudo systemctl daemon-reload

@@ -109,7 +109,12 @@ echo ""
 echo "--- Step 4: Installing systemd services ---"
 
 log "Installing n8n-stack auto-start service..."
-sudo cp "$SCRIPT_DIR/systemd/n8n-stack.service" /etc/systemd/system/
+# Substitute the current user and group into the service file
+# This ensures the service runs as the same user who deployed the containers
+CURRENT_USER="$(id -un)"
+CURRENT_GROUP="$(id -gn)"
+sed "s/__DEPLOY_USER__/${CURRENT_USER}/g; s/__DEPLOY_GROUP__/${CURRENT_GROUP}/g" \
+    "$SCRIPT_DIR/systemd/n8n-stack.service" | sudo tee /etc/systemd/system/n8n-stack.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable n8n-stack.service
 
