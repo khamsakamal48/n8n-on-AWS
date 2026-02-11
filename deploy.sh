@@ -104,18 +104,26 @@ echo "  REDIS_PASSWORD     = ${REDIS_PASS}"
 echo ""
 warn "The encryption key is critical — losing it means losing access to all stored credentials in n8n."
 
-# --- Step 4: Install Update-Check Timer ---
+# --- Step 4: Install Systemd Services ---
 echo ""
-echo "--- Step 4: Installing daily image update-check timer ---"
+echo "--- Step 4: Installing systemd services ---"
 
+log "Installing n8n-stack auto-start service..."
+sudo cp "$SCRIPT_DIR/systemd/n8n-stack.service" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable n8n-stack.service
+
+log "Installing daily image update-check timer..."
 sudo cp "$SCRIPT_DIR/systemd/n8n-check-updates.service" /etc/systemd/system/
 sudo cp "$SCRIPT_DIR/systemd/n8n-check-updates.timer"   /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now n8n-check-updates.timer
 
-log "Systemd timer installed (checks for image updates daily)"
-echo "  View results: journalctl -u n8n-check-updates.service --since today"
-echo "  Run now:      sudo systemctl start n8n-check-updates.service"
+log "Systemd services installed successfully"
+echo "  Auto-start:    n8n-stack.service (enabled, will start on next boot)"
+echo "  Update check:  n8n-check-updates.timer (enabled, runs daily)"
+echo "  View results:  journalctl -u n8n-check-updates.service --since today"
+echo "  Run check now: sudo systemctl start n8n-check-updates.service"
 
 # --- Step 5: Build and Launch ---
 echo ""
@@ -196,10 +204,14 @@ echo "  Dashboard:     https://n8n.iitbacr.space"
 echo "  Docling UI:    http://localhost:5001/ui"
 echo "  Docling Docs:  http://localhost:5001/docs"
 echo ""
+echo "  Auto-start:    Enabled (containers will start automatically on boot)"
+echo "  Service:       sudo systemctl status n8n-stack.service"
+echo ""
 echo "  Logs:          cd $DEPLOY_DIR && $COMPOSE logs -f"
 echo "  Status:        cd $DEPLOY_DIR && $COMPOSE ps"
 echo "  Resources:     podman stats --no-stream"
-echo "  Stop:          cd $DEPLOY_DIR && $COMPOSE down"
+echo "  Stop:          sudo systemctl stop n8n-stack.service"
+echo "  Start:         sudo systemctl start n8n-stack.service"
 echo ""
 echo "  Update check:  journalctl -u n8n-check-updates.service --since today"
 echo "  Run check now: sudo systemctl start n8n-check-updates.service"
