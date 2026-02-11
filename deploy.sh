@@ -5,6 +5,17 @@
 # =============================================================================
 set -euo pipefail
 
+# --- Guard: Do NOT run as root ---
+# Running as root causes all files to be owned by root, but the systemd service
+# must run as a regular user (Podman rootless). Individual commands that need
+# elevated privileges already use 'sudo' explicitly.
+if [[ $EUID -eq 0 ]]; then
+    echo -e "\033[0;31m[✗]\033[0m Do NOT run this script as root (or with sudo)."
+    echo "    It will use sudo internally when needed."
+    echo "    Run as your regular user: ./deploy.sh"
+    exit 1
+fi
+
 DEPLOY_DIR="/opt/n8n-production"
 export COMPOSE_PROJECT_NAME="n8n-automation"
 
