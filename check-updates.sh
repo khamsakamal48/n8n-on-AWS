@@ -59,7 +59,12 @@ for container in "${!CONTAINERS[@]}"; do
 
     if [ "$USE_SKOPEO" = true ]; then
         # ---- skopeo path: compare digests without pulling ----
-        local_digest=$(podman image inspect --format '{{.Digest}}' "$image" 2>/dev/null || echo "")
+        #
+        # Use skopeo for BOTH local and remote to get consistent digest
+        # types.  podman stores the manifest-list digest while skopeo
+        # resolves multi-arch and returns the platform-specific manifest
+        # digest — mixing the two causes false positives.
+        local_digest=$(skopeo inspect "containers-storage:$image" --format '{{.Digest}}' 2>/dev/null || echo "")
         remote_digest=$(skopeo inspect "docker://$image" --format '{{.Digest}}' 2>/dev/null || echo "")
 
         if [ -z "$remote_digest" ]; then
@@ -68,7 +73,12 @@ for container in "${!CONTAINERS[@]}"; do
             continue
         fi
 
-        if [ "$local_digest" = "$remote_digest" ]; then
+        # Fall back to podman digest if skopeo can't inspect local storage
+        if [ -z "$local_digest" ]; then
+            local_digest=$(podman image inspect --format '{{.Digest}}' "$image" 2>/dev/null || echo "")
+        fi
+
+        if [ -n "$local_digest" ] && [ "$local_digest" = "$remote_digest" ]; then
             echo "  OK    $container — up to date"
         else
             echo "  NEW   $container — update available"
