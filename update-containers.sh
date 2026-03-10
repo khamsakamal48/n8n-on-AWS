@@ -128,7 +128,14 @@ check_for_updates() {
 
         if [ "$use_skopeo" = true ]; then
             # ---- skopeo path: compare digests without pulling ----
-            local_digest=$(podman image inspect --format '{{.Digest}}' "$image" 2>/dev/null || echo "")
+            #
+            # NOTE: We compare digests from BOTH skopeo calls to avoid
+            # false positives.  podman stores the *manifest list* digest
+            # while `skopeo inspect` resolves multi-arch and returns the
+            # *platform manifest* digest — these are always different for
+            # multi-arch images.  Using skopeo for both sides keeps the
+            # comparison consistent.
+            local_digest=$(skopeo inspect "containers-storage:$image" --format '{{.Digest}}' 2>/dev/null || echo "")
             remote_digest=$(skopeo inspect "docker://$image" --format '{{.Digest}}' 2>/dev/null || echo "")
 
             if [ -z "$remote_digest" ]; then
@@ -137,7 +144,12 @@ check_for_updates() {
                 continue
             fi
 
-            if [ "$local_digest" = "$remote_digest" ]; then
+            # If skopeo can't inspect local storage, fall back to podman digest
+            if [ -z "$local_digest" ]; then
+                local_digest=$(podman image inspect --format '{{.Digest}}' "$image" 2>/dev/null || echo "")
+            fi
+
+            if [ -n "$local_digest" ] && [ "$local_digest" = "$remote_digest" ]; then
                 echo -e "${GREEN}up to date${NC}"
             else
                 echo -e "${YELLOW}update available${NC}"
@@ -292,6 +304,40 @@ apply_updates() {
         fi
 
         echo ""
+
+        # Record the image ID the running container is currently using
+        local old_image_id
+        old_image_id=$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null \
+                       || podman image inspect --format '{{.Id}}' "$image" 2>/dev/null \
+                       || echo "")
+
+        # Pull the latest image FIRST (container stays running — no downtime yet).
+        # This lets us verify the image actually changed before stopping anything.
+        print_info "Pulling latest image ($image) ..."
+        if ! podman pull "$image"; then
+            print_error "Failed to pull $image — retrying ..."
+            if ! podman pull "$image"; then
+                print_error "Failed to pull $image"
+                ((failed++)) || true
+                echo ""
+                continue
+            fi
+        fi
+
+        # Compare image IDs to verify the pull actually fetched a newer image.
+        # skopeo digest checks can produce false positives (manifest-list digest
+        # vs platform-specific digest mismatch), so this is the definitive test.
+        local new_image_id
+        new_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+
+        if [ -n "$old_image_id" ] && [ "$old_image_id" = "$new_image_id" ]; then
+            print_warning "$name — image is already at the latest version (false positive from digest check)"
+            ((skipped++)) || true
+            echo ""
+            continue
+        fi
+
+        # Image genuinely changed — now stop, clean up, and restart
         print_info "Stopping $name ..."
         if ! podman-compose stop "$service"; then
             print_error "Failed to stop $name"
@@ -300,7 +346,7 @@ apply_updates() {
             continue
         fi
 
-        # Clean up stopped container to prevent name conflicts on restart
+        # Clean up stopped container so podman-compose recreates it with the new image
         local state
         state=$(podman ps -a --filter "name=^${container}$" --format "{{.State}}" 2>/dev/null || echo "")
         if [[ "$state" == "exited" || "$state" == "stopped" ]]; then
@@ -308,27 +354,10 @@ apply_updates() {
             podman rm "$container" 2>/dev/null || true
         fi
 
-        # Remove the old image so the pull fetches a completely fresh copy.
-        # Without this, podman may reuse cached layers and the container
-        # ends up running the same image despite the pull succeeding.
-        local old_image_id
-        old_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
-        if [ -n "$old_image_id" ]; then
-            print_info "Removing old image ($image) ..."
-            podman rmi "$image" 2>/dev/null || true
-        fi
-
-        # Pull the latest image — a fresh download now that the old one is gone
-        print_info "Pulling latest image ($image) ..."
-        if ! podman pull "$image"; then
-            print_error "Failed to pull $image — attempting recovery ..."
-            # If pull fails and we removed the old image, try once more
-            if ! podman pull "$image"; then
-                print_error "Failed to pull $image"
-                ((failed++)) || true
-                echo ""
-                continue
-            fi
+        # Remove the old image to free disk space (new image is already pulled)
+        if [ -n "$old_image_id" ] && [ "$old_image_id" != "$new_image_id" ]; then
+            print_info "Removing old image ..."
+            podman rmi "$old_image_id" 2>/dev/null || true
         fi
 
         print_info "Starting $name with new image ..."
