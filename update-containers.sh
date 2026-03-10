@@ -273,6 +273,15 @@ apply_updates() {
             podman rm "$container" 2>/dev/null || true
         fi
 
+        # Pull the latest image to ensure the new container uses it
+        print_info "Pulling latest image ($image) ..."
+        if ! podman pull "$image"; then
+            print_error "Failed to pull $image"
+            ((failed++)) || true
+            echo ""
+            continue
+        fi
+
         print_info "Starting $name with new image ..."
         if podman-compose up -d "$service"; then
             print_success "$name updated successfully"
