@@ -12,7 +12,9 @@
 #   ./update-containers.sh            # Run from /opt/n8n-production
 #   ./update-containers.sh --check    # Check only, don't offer to update
 #
-# Locally-built images (n8n-runners) are skipped — no remote tag to check.
+# When n8n has an update, the n8n-runners base image (n8nio/runners:stable)
+# is also updated. The script detects this and offers to rebuild + restart
+# the runners automatically.
 # =============================================================================
 set -euo pipefail
 
@@ -27,7 +29,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # --- Container → image mapping --------------------------------------------
-# Same mapping as check-updates.sh. Excludes n8n-runners (locally built).
+# Excludes n8n-runners (locally built — rebuilt when n8n is updated).
 declare -A CONTAINERS=(
     ["n8n-postgres"]="docker.io/library/postgres:latest"
     ["n8n-redis"]="docker.io/library/redis:latest"
@@ -50,6 +52,9 @@ declare -A DISPLAY_NAMES=(
     ["n8n"]="n8n"
     ["n8n-docling"]="Docling Serve"
 )
+
+# Runners base image (FROM line in runners/Dockerfile)
+RUNNERS_BASE_IMAGE="docker.io/n8nio/runners:stable"
 
 # --- Helpers ---------------------------------------------------------------
 print_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -139,6 +144,60 @@ check_for_updates() {
     echo ""
 }
 
+# --- Rebuild n8n Runners ---------------------------------------------------
+# Called automatically when n8n is updated, since the runners base image
+# (n8nio/runners:stable) tracks the same release cycle.
+rebuild_runners() {
+    echo -e "────────────────────────────────────────────────────"
+    echo -e "  ${BOLD}n8n Runners${NC}  (service: n8n-runners)"
+    echo -e "  Base image: $RUNNERS_BASE_IMAGE"
+    echo -e "  ${YELLOW}n8n was updated — runners base image has a matching update${NC}"
+    echo ""
+
+    if ! ask_yes_no "  Rebuild and update n8n Runners?"; then
+        print_skip "Skipped n8n Runners"
+        return 1
+    fi
+
+    echo ""
+
+    # Pull the latest runners base image so the build uses it
+    print_info "Pulling latest runners base image ($RUNNERS_BASE_IMAGE) ..."
+    if ! podman pull "$RUNNERS_BASE_IMAGE" -q >/dev/null 2>&1; then
+        print_error "Failed to pull $RUNNERS_BASE_IMAGE"
+        return 2
+    fi
+
+    # Stop runners
+    print_info "Stopping n8n Runners ..."
+    podman-compose stop n8n-runners || true
+
+    # Clean up stopped container
+    local state
+    state=$(podman ps -a --filter "name=^n8n-runners$" --format "{{.State}}" 2>/dev/null || echo "")
+    if [[ "$state" == "exited" || "$state" == "stopped" ]]; then
+        print_info "Removing stopped container ..."
+        podman rm n8n-runners 2>/dev/null || true
+    fi
+
+    # Rebuild with --no-cache to ensure the new base image is used
+    print_info "Rebuilding n8n Runners image (--no-cache) ..."
+    if ! podman-compose build --no-cache n8n-runners; then
+        print_error "Failed to rebuild n8n Runners image"
+        return 2
+    fi
+
+    # Start runners
+    print_info "Starting n8n Runners with new image ..."
+    if podman-compose up -d n8n-runners; then
+        print_success "n8n Runners rebuilt and updated successfully"
+        return 0
+    else
+        print_error "Failed to start n8n Runners"
+        return 2
+    fi
+}
+
 # --- Phase 2: Interactive update -------------------------------------------
 apply_updates() {
     if [ ${#UPDATABLE_CONTAINERS[@]} -eq 0 ]; then
@@ -147,12 +206,28 @@ apply_updates() {
         return
     fi
 
-    echo -e "${BOLD}Updates available for ${#UPDATABLE_CONTAINERS[@]} container(s):${NC}"
+    local n8n_in_list=false
+    for i in "${!UPDATABLE_CONTAINERS[@]}"; do
+        if [ "${UPDATABLE_CONTAINERS[$i]}" = "n8n" ]; then
+            n8n_in_list=true
+            break
+        fi
+    done
+
+    local extra=0
+    if [ "$n8n_in_list" = true ]; then
+        extra=1
+    fi
+
+    echo -e "${BOLD}Updates available for $(( ${#UPDATABLE_CONTAINERS[@]} + extra )) container(s):${NC}"
     for i in "${!UPDATABLE_CONTAINERS[@]}"; do
         local container="${UPDATABLE_CONTAINERS[$i]}"
         local name="${DISPLAY_NAMES[$container]}"
         echo -e "  ${YELLOW}•${NC} $name ($container)"
     done
+    if [ "$n8n_in_list" = true ]; then
+        echo -e "  ${YELLOW}•${NC} n8n Runners (n8n-runners) — rebuild needed, base image tracks n8n"
+    fi
     echo ""
 
     # Move into compose directory for podman-compose commands
@@ -161,6 +236,7 @@ apply_updates() {
     local updated=0
     local skipped=0
     local failed=0
+    local n8n_was_updated=false
 
     for i in "${!UPDATABLE_CONTAINERS[@]}"; do
         local container="${UPDATABLE_CONTAINERS[$i]}"
@@ -201,12 +277,30 @@ apply_updates() {
         if podman-compose up -d "$service"; then
             print_success "$name updated successfully"
             ((updated++))
+            # Track n8n update so we can offer runners rebuild
+            if [ "$container" = "n8n" ]; then
+                n8n_was_updated=true
+            fi
         else
             print_error "Failed to start $name"
             ((failed++))
         fi
         echo ""
     done
+
+    # If n8n was updated, offer to rebuild runners (same release cycle)
+    if [ "$n8n_was_updated" = true ]; then
+        rebuild_runners
+        local rc=$?
+        if [ $rc -eq 0 ]; then
+            ((updated++))
+        elif [ $rc -eq 1 ]; then
+            ((skipped++))
+        else
+            ((failed++))
+        fi
+        echo ""
+    fi
 
     # --- Summary -----------------------------------------------------------
     echo -e "════════════════════════════════════════════════════"
