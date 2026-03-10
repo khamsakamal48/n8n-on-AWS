@@ -6,10 +6,13 @@
 # Runs daily via systemd timer (n8n-check-updates.timer).
 #
 # How it works:
-#   1. For each monitored container, record the image ID it is running
-#   2. Pull the latest tag from the registry (only downloads new layers)
-#   3. Compare the pulled image ID to the running one
+#   1. For each monitored container, get the local image digest
+#   2. Query the registry for the remote digest (via skopeo, no pull)
+#   3. Compare local vs remote digests to detect updates
 #   4. Log results to stdout (captured by systemd journal)
+#
+# Falls back to podman pull if skopeo is not installed, but this has the
+# side effect of downloading the new image during the check itself.
 #
 # Locally-built images (n8n-runners) are skipped — they have no remote tag.
 #
@@ -32,7 +35,16 @@ declare -A CONTAINERS=(
 UPDATES=()
 ERRORS=()
 
+# Prefer skopeo (checks registry without pulling)
+USE_SKOPEO=true
+if ! command -v skopeo &>/dev/null; then
+    USE_SKOPEO=false
+fi
+
 echo "=== n8n Stack — Image Update Check ($(date --iso-8601=minutes)) ==="
+if [ "$USE_SKOPEO" = false ]; then
+    echo "  (skopeo not found — using podman pull fallback)"
+fi
 echo ""
 
 for container in "${!CONTAINERS[@]}"; do
@@ -45,24 +57,45 @@ for container in "${!CONTAINERS[@]}"; do
         continue
     fi
 
-    # Pull latest tag (downloads only changed layers)
-    if ! podman pull "$image" -q >/dev/null 2>&1; then
-        echo "  ERROR $container — failed to pull $image"
-        ERRORS+=("$container")
-        continue
-    fi
+    if [ "$USE_SKOPEO" = true ]; then
+        # ---- skopeo path: compare digests without pulling ----
+        local_digest=$(podman image inspect --format '{{.Digest}}' "$image" 2>/dev/null || echo "")
+        remote_digest=$(skopeo inspect "docker://$image" --format '{{.Digest}}' 2>/dev/null || echo "")
 
-    # Image ID of what we just pulled
-    latest_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+        if [ -z "$remote_digest" ]; then
+            echo "  ERROR $container — failed to query registry for $image"
+            ERRORS+=("$container")
+            continue
+        fi
 
-    if [ "$running_id" = "$latest_id" ]; then
-        echo "  OK    $container — up to date"
+        if [ "$local_digest" = "$remote_digest" ]; then
+            echo "  OK    $container — up to date"
+        else
+            echo "  NEW   $container — update available"
+            echo "          image:   $image"
+            echo "          local:   ${local_digest:7:12}"
+            echo "          remote:  ${remote_digest:7:12}"
+            UPDATES+=("$container")
+        fi
     else
-        echo "  NEW   $container — update available"
-        echo "          image:   $image"
-        echo "          running: ${running_id:0:12}"
-        echo "          latest:  ${latest_id:0:12}"
-        UPDATES+=("$container")
+        # ---- fallback: pull quietly, then compare image IDs ----
+        if ! podman pull -q "$image" >/dev/null 2>&1; then
+            echo "  ERROR $container — failed to pull $image"
+            ERRORS+=("$container")
+            continue
+        fi
+
+        latest_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+
+        if [ "$running_id" = "$latest_id" ]; then
+            echo "  OK    $container — up to date"
+        else
+            echo "  NEW   $container — update available"
+            echo "          image:   $image"
+            echo "          running: ${running_id:0:12}"
+            echo "          latest:  ${latest_id:0:12}"
+            UPDATES+=("$container")
+        fi
     fi
 done
 

@@ -102,8 +102,16 @@ check_for_updates() {
 
     UPDATABLE_CONTAINERS=()
     UPDATABLE_IMAGES=()
-    UPDATABLE_RUNNING_IDS=()
-    UPDATABLE_LATEST_IDS=()
+
+    # Prefer skopeo (checks registry without pulling).
+    # Falls back to podman pull if skopeo is unavailable.
+    local use_skopeo=true
+    if ! command -v skopeo &>/dev/null; then
+        use_skopeo=false
+        print_warning "skopeo not found — falling back to podman pull for update checks"
+        print_warning "(install skopeo for faster, pull-free update detection)"
+        echo ""
+    fi
 
     for container in "${!CONTAINERS[@]}"; do
         image="${CONTAINERS[$container]}"
@@ -118,26 +126,47 @@ check_for_updates() {
 
         echo -en "  Checking ${BOLD}$name${NC} ... "
 
-        # Pull latest tag (only downloads changed layers)
-        if ! podman pull "$image" -q >/dev/null 2>&1; then
-            echo ""
-            print_error "$name — failed to pull $image"
-            continue
-        fi
+        if [ "$use_skopeo" = true ]; then
+            # ---- skopeo path: compare digests without pulling ----
+            local_digest=$(podman image inspect --format '{{.Digest}}' "$image" 2>/dev/null || echo "")
+            remote_digest=$(skopeo inspect "docker://$image" --format '{{.Digest}}' 2>/dev/null || echo "")
 
-        # Compare image IDs
-        latest_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+            if [ -z "$remote_digest" ]; then
+                echo ""
+                print_error "$name — failed to query registry for $image"
+                continue
+            fi
 
-        if [ "$running_id" = "$latest_id" ]; then
-            echo -e "${GREEN}up to date${NC}"
+            if [ "$local_digest" = "$remote_digest" ]; then
+                echo -e "${GREEN}up to date${NC}"
+            else
+                echo -e "${YELLOW}update available${NC}"
+                echo -e "         local:   ${local_digest:7:12}"
+                echo -e "         remote:  ${remote_digest:7:12}"
+                UPDATABLE_CONTAINERS+=("$container")
+                UPDATABLE_IMAGES+=("$image")
+            fi
         else
-            echo -e "${YELLOW}update available${NC}"
-            echo -e "         running: ${running_id:0:12}"
-            echo -e "         latest:  ${latest_id:0:12}"
-            UPDATABLE_CONTAINERS+=("$container")
-            UPDATABLE_IMAGES+=("$image")
-            UPDATABLE_RUNNING_IDS+=("$running_id")
-            UPDATABLE_LATEST_IDS+=("$latest_id")
+            # ---- fallback: pull quietly, then compare image IDs ----
+            # NOTE: this pre-downloads the image, so the apply-phase pull
+            # will show "already exists" for every layer.
+            if ! podman pull -q "$image" >/dev/null 2>&1; then
+                echo ""
+                print_error "$name — failed to pull $image"
+                continue
+            fi
+
+            latest_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+
+            if [ "$running_id" = "$latest_id" ]; then
+                echo -e "${GREEN}up to date${NC}"
+            else
+                echo -e "${YELLOW}update available${NC}"
+                echo -e "         running: ${running_id:0:12}"
+                echo -e "         latest:  ${latest_id:0:12}"
+                UPDATABLE_CONTAINERS+=("$container")
+                UPDATABLE_IMAGES+=("$image")
+            fi
         fi
     done
 
