@@ -251,7 +251,7 @@ apply_updates() {
 
         if ! ask_yes_no "  Update $name?"; then
             print_skip "Skipped $name"
-            ((skipped++))
+            ((skipped++)) || true
             echo ""
             continue
         fi
@@ -260,7 +260,7 @@ apply_updates() {
         print_info "Stopping $name ..."
         if ! podman-compose stop "$service"; then
             print_error "Failed to stop $name"
-            ((failed++))
+            ((failed++)) || true
             echo ""
             continue
         fi
@@ -276,14 +276,14 @@ apply_updates() {
         print_info "Starting $name with new image ..."
         if podman-compose up -d "$service"; then
             print_success "$name updated successfully"
-            ((updated++))
+            ((updated++)) || true
             # Track n8n update so we can offer runners rebuild
             if [ "$container" = "n8n" ]; then
                 n8n_was_updated=true
             fi
         else
             print_error "Failed to start $name"
-            ((failed++))
+            ((failed++)) || true
         fi
         echo ""
     done
@@ -293,11 +293,11 @@ apply_updates() {
         rebuild_runners
         local rc=$?
         if [ $rc -eq 0 ]; then
-            ((updated++))
+            ((updated++)) || true
         elif [ $rc -eq 1 ]; then
-            ((skipped++))
+            ((skipped++)) || true
         else
-            ((failed++))
+            ((failed++)) || true
         fi
         echo ""
     fi
