@@ -63,6 +63,11 @@ print_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 print_error()   { echo -e "${RED}[ERR]${NC}  $1"; }
 print_skip()    { echo -e "       $1"; }
 
+# Strip "sha256:" prefix from image/container IDs for reliable comparison.
+# Podman inconsistently includes/omits this prefix between container inspect
+# ({{.Image}}) and image inspect ({{.Id}}), causing comparisons to fail.
+normalize_id() { echo "${1#sha256:}"; }
+
 # Ask a yes/no question. Returns 0 for yes, 1 for no.
 ask_yes_no() {
     local prompt="$1"
@@ -119,6 +124,7 @@ check_for_updates() {
 
         # Get the image ID the running container was started from
         running_id=$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")
+        running_id=$(normalize_id "$running_id")
         if [ -z "$running_id" ]; then
             print_skip "$name ($container) — not running, skipping"
             continue
@@ -162,6 +168,7 @@ check_for_updates() {
 
                 local latest_id
                 latest_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+                latest_id=$(normalize_id "$latest_id")
 
                 if [ -n "$latest_id" ] && [ "$running_id" = "$latest_id" ]; then
                     echo -e "${GREEN}up to date${NC}"
@@ -184,6 +191,7 @@ check_for_updates() {
             fi
 
             latest_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+            latest_id=$(normalize_id "$latest_id")
 
             if [ "$running_id" = "$latest_id" ]; then
                 echo -e "${GREEN}up to date${NC}"
@@ -221,13 +229,9 @@ rebuild_runners() {
     print_info "Stopping n8n Runners ..."
     podman-compose stop n8n-runners || true
 
-    # Clean up stopped container
-    local state
-    state=$(podman ps -a --filter "name=^n8n-runners$" --format "{{.State}}" 2>/dev/null || echo "")
-    if [[ "$state" == "exited" || "$state" == "stopped" ]]; then
-        print_info "Removing stopped container ..."
-        podman rm n8n-runners 2>/dev/null || true
-    fi
+    # Force-remove container to ensure clean recreation
+    print_info "Removing old container ..."
+    podman rm -f n8n-runners 2>/dev/null || true
 
     # Remove old runners base image and the locally built image so the
     # rebuild starts completely fresh
@@ -325,6 +329,7 @@ apply_updates() {
         # already point to a newer image from the check-phase pull.
         local old_image_id
         old_image_id=$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")
+        old_image_id=$(normalize_id "$old_image_id")
 
         # Pull the latest image FIRST (container stays running — no downtime yet).
         # This lets us verify the image actually changed before stopping anything.
@@ -339,27 +344,12 @@ apply_updates() {
             fi
         fi
 
-        # Compare image IDs to verify the pull actually fetched a newer image.
-        # skopeo digest checks can produce false positives (manifest-list digest
-        # vs platform-specific digest mismatch), so this is the definitive test.
+        # Get the new image ID after pull (normalized for comparison)
         local new_image_id
         new_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+        new_image_id=$(normalize_id "$new_image_id")
 
-        if [ -n "$old_image_id" ] && [ "$old_image_id" = "$new_image_id" ]; then
-            print_warning "$name — container is already running the latest image, skipping"
-            ((skipped++)) || true
-            echo ""
-            continue
-        fi
-
-        if [ -z "$old_image_id" ]; then
-            print_warning "$name — could not determine running container's image ID, skipping"
-            ((skipped++)) || true
-            echo ""
-            continue
-        fi
-
-        # Image genuinely changed — now stop, clean up, and restart
+        # Proceed with update — stop, clean up, and restart
         print_info "Stopping $name ..."
         if ! podman-compose stop "$service"; then
             print_error "Failed to stop $name"
@@ -368,13 +358,10 @@ apply_updates() {
             continue
         fi
 
-        # Clean up stopped container so podman-compose recreates it with the new image
-        local state
-        state=$(podman ps -a --filter "name=^${container}$" --format "{{.State}}" 2>/dev/null || echo "")
-        if [[ "$state" == "exited" || "$state" == "stopped" ]]; then
-            print_info "Removing stopped container ..."
-            podman rm "$container" 2>/dev/null || true
-        fi
+        # Force-remove container so podman-compose recreates it with the new image.
+        # Must be unconditional — state-based checks miss "created"/"dead" states.
+        print_info "Removing old container ..."
+        podman rm -f "$container" 2>/dev/null || true
 
         # Remove the old image to free disk space (new image is already pulled)
         if [ -n "$old_image_id" ] && [ "$old_image_id" != "$new_image_id" ]; then
@@ -384,8 +371,29 @@ apply_updates() {
 
         print_info "Starting $name with new image ..."
         if podman-compose up -d "$service"; then
-            print_success "$name updated successfully"
-            ((updated++)) || true
+            # Verify the new container is actually using the updated image
+            local verify_id
+            verify_id=$(normalize_id "$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")")
+
+            if [ -n "$verify_id" ] && [ -n "$old_image_id" ] && [ "$verify_id" = "$old_image_id" ]; then
+                # Container is still on the old image — force-recreate
+                print_warning "$name — still running old image, forcing recreate ..."
+                podman stop "$container" 2>/dev/null || true
+                podman rm -f "$container" 2>/dev/null || true
+                if podman-compose up -d "$service"; then
+                    verify_id=$(normalize_id "$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")")
+                    print_success "$name updated (image: ${old_image_id:0:12} → ${verify_id:0:12})"
+                    ((updated++)) || true
+                else
+                    print_error "Failed to start $name after force-recreate"
+                    ((failed++)) || true
+                    echo ""
+                    continue
+                fi
+            else
+                print_success "$name updated (image: ${old_image_id:0:12} → ${verify_id:0:12})"
+                ((updated++)) || true
+            fi
             # Track n8n update so we can offer runners rebuild
             if [ "$container" = "n8n" ]; then
                 n8n_was_updated=true
