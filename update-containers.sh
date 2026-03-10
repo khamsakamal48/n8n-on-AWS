@@ -190,14 +190,7 @@ rebuild_runners() {
 
     echo ""
 
-    # Pull the latest runners base image so the build uses it
-    print_info "Pulling latest runners base image ($RUNNERS_BASE_IMAGE) ..."
-    if ! podman pull "$RUNNERS_BASE_IMAGE" -q >/dev/null 2>&1; then
-        print_error "Failed to pull $RUNNERS_BASE_IMAGE"
-        return 2
-    fi
-
-    # Stop runners
+    # Stop runners first so the base image is not in use
     print_info "Stopping n8n Runners ..."
     podman-compose stop n8n-runners || true
 
@@ -207,6 +200,19 @@ rebuild_runners() {
     if [[ "$state" == "exited" || "$state" == "stopped" ]]; then
         print_info "Removing stopped container ..."
         podman rm n8n-runners 2>/dev/null || true
+    fi
+
+    # Remove old runners base image and the locally built image so the
+    # rebuild starts completely fresh
+    print_info "Removing old runners images ..."
+    podman rmi "n8n-runners-python:latest" 2>/dev/null || true
+    podman rmi "$RUNNERS_BASE_IMAGE" 2>/dev/null || true
+
+    # Pull the latest runners base image
+    print_info "Pulling latest runners base image ($RUNNERS_BASE_IMAGE) ..."
+    if ! podman pull "$RUNNERS_BASE_IMAGE"; then
+        print_error "Failed to pull $RUNNERS_BASE_IMAGE"
+        return 2
     fi
 
     # Rebuild with --no-cache to ensure the new base image is used
@@ -302,13 +308,27 @@ apply_updates() {
             podman rm "$container" 2>/dev/null || true
         fi
 
-        # Pull the latest image to ensure the new container uses it
+        # Remove the old image so the pull fetches a completely fresh copy.
+        # Without this, podman may reuse cached layers and the container
+        # ends up running the same image despite the pull succeeding.
+        local old_image_id
+        old_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+        if [ -n "$old_image_id" ]; then
+            print_info "Removing old image ($image) ..."
+            podman rmi "$image" 2>/dev/null || true
+        fi
+
+        # Pull the latest image — a fresh download now that the old one is gone
         print_info "Pulling latest image ($image) ..."
         if ! podman pull "$image"; then
-            print_error "Failed to pull $image"
-            ((failed++)) || true
-            echo ""
-            continue
+            print_error "Failed to pull $image — attempting recovery ..."
+            # If pull fails and we removed the old image, try once more
+            if ! podman pull "$image"; then
+                print_error "Failed to pull $image"
+                ((failed++)) || true
+                echo ""
+                continue
+            fi
         fi
 
         print_info "Starting $name with new image ..."
