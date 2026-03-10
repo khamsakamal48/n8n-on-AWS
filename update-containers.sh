@@ -129,12 +129,12 @@ check_for_updates() {
         if [ "$use_skopeo" = true ]; then
             # ---- skopeo path: compare digests without pulling ----
             #
-            # NOTE: We compare digests from BOTH skopeo calls to avoid
-            # false positives.  podman stores the *manifest list* digest
-            # while `skopeo inspect` resolves multi-arch and returns the
-            # *platform manifest* digest — these are always different for
-            # multi-arch images.  Using skopeo for both sides keeps the
-            # comparison consistent.
+            # NOTE: skopeo digest comparison can produce false positives
+            # because containers-storage: and docker:// transports may
+            # return different digest types (manifest-list vs platform-
+            # specific manifest) for the same image.  When digests
+            # differ, we pull the image and compare image IDs to verify
+            # the update is genuine before reporting it.
             local_digest=$(skopeo inspect "containers-storage:$image" --format '{{.Digest}}' 2>/dev/null || echo "")
             remote_digest=$(skopeo inspect "docker://$image" --format '{{.Digest}}' 2>/dev/null || echo "")
 
@@ -152,11 +152,26 @@ check_for_updates() {
             if [ -n "$local_digest" ] && [ "$local_digest" = "$remote_digest" ]; then
                 echo -e "${GREEN}up to date${NC}"
             else
-                echo -e "${YELLOW}update available${NC}"
-                echo -e "         local:   ${local_digest:7:12}"
-                echo -e "         remote:  ${remote_digest:7:12}"
-                UPDATABLE_CONTAINERS+=("$container")
-                UPDATABLE_IMAGES+=("$image")
+                # Digests differ — verify by pulling and comparing image IDs.
+                # This eliminates false positives from digest-type mismatches.
+                if ! podman pull -q "$image" >/dev/null 2>&1; then
+                    echo ""
+                    print_error "$name — failed to pull $image for verification"
+                    continue
+                fi
+
+                local latest_id
+                latest_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+
+                if [ -n "$latest_id" ] && [ "$running_id" = "$latest_id" ]; then
+                    echo -e "${GREEN}up to date${NC}"
+                else
+                    echo -e "${YELLOW}update available${NC}"
+                    echo -e "         running: ${running_id:0:12}"
+                    echo -e "         latest:  ${latest_id:0:12}"
+                    UPDATABLE_CONTAINERS+=("$container")
+                    UPDATABLE_IMAGES+=("$image")
+                fi
             fi
         else
             # ---- fallback: pull quietly, then compare image IDs ----
@@ -305,11 +320,11 @@ apply_updates() {
 
         echo ""
 
-        # Record the image ID the running container is currently using
+        # Record the image ID the running container is currently using.
+        # Only inspect the container (not the image tag) — the tag may
+        # already point to a newer image from the check-phase pull.
         local old_image_id
-        old_image_id=$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null \
-                       || podman image inspect --format '{{.Id}}' "$image" 2>/dev/null \
-                       || echo "")
+        old_image_id=$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")
 
         # Pull the latest image FIRST (container stays running — no downtime yet).
         # This lets us verify the image actually changed before stopping anything.
@@ -331,7 +346,14 @@ apply_updates() {
         new_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
 
         if [ -n "$old_image_id" ] && [ "$old_image_id" = "$new_image_id" ]; then
-            print_warning "$name — image is already at the latest version (false positive from digest check)"
+            print_warning "$name — container is already running the latest image, skipping"
+            ((skipped++)) || true
+            echo ""
+            continue
+        fi
+
+        if [ -z "$old_image_id" ]; then
+            print_warning "$name — could not determine running container's image ID, skipping"
             ((skipped++)) || true
             echo ""
             continue
