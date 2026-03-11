@@ -255,7 +255,7 @@ rebuild_runners() {
 
     # Start runners
     print_info "Starting n8n Runners with new image ..."
-    if podman-compose up -d n8n-runners; then
+    if podman-compose up -d --force-recreate n8n-runners; then
         print_success "n8n Runners rebuilt and updated successfully"
         return 0
     else
@@ -369,27 +369,17 @@ apply_updates() {
             podman rmi "$old_image_id" 2>/dev/null || true
         fi
 
+        # --force-recreate ensures podman-compose creates a fresh container
+        # with the newly-pulled image, rather than reusing cached state.
         print_info "Starting $name with new image ..."
-        if podman-compose up -d "$service"; then
+        if podman-compose up -d --force-recreate "$service"; then
             # Verify the new container is actually using the updated image
             local verify_id
             verify_id=$(normalize_id "$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")")
 
             if [ -n "$verify_id" ] && [ -n "$old_image_id" ] && [ "$verify_id" = "$old_image_id" ]; then
-                # Container is still on the old image — force-recreate
-                print_warning "$name — still running old image, forcing recreate ..."
-                podman stop "$container" 2>/dev/null || true
-                podman rm -f "$container" 2>/dev/null || true
-                if podman-compose up -d "$service"; then
-                    verify_id=$(normalize_id "$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")")
-                    print_success "$name updated (image: ${old_image_id:0:12} → ${verify_id:0:12})"
-                    ((updated++)) || true
-                else
-                    print_error "Failed to start $name after force-recreate"
-                    ((failed++)) || true
-                    echo ""
-                    continue
-                fi
+                print_error "$name — still running old image after force-recreate (${verify_id:0:12})"
+                ((failed++)) || true
             else
                 print_success "$name updated (image: ${old_image_id:0:12} → ${verify_id:0:12})"
                 ((updated++)) || true
