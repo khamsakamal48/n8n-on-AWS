@@ -43,6 +43,17 @@ declare -A CONTAINER_TO_SERVICE=(
     ["n8n-redis"]="redis"
     ["n8n"]="n8n"
     ["n8n-docling"]="docling"
+    ["n8n-runners"]="n8n-runners"
+)
+
+# Reverse dependency map: containers that must be removed BEFORE the target
+# can be removed (podman refuses to remove a container that has dependents).
+# Order: leaf-first (n8n-runners before n8n) so removals succeed.
+declare -A DEPENDENTS=(
+    ["n8n-postgres"]="n8n-runners n8n"
+    ["n8n-redis"]="n8n-runners n8n"
+    ["n8n"]="n8n-runners"
+    ["n8n-docling"]=""
 )
 
 # Friendly display names
@@ -67,6 +78,45 @@ print_skip()    { echo -e "       $1"; }
 # Podman inconsistently includes/omits this prefix between container inspect
 # ({{.Image}}) and image inspect ({{.Id}}), causing comparisons to fail.
 normalize_id() { echo "${1#sha256:}"; }
+
+# Stop and remove containers that depend on the target container.
+# Podman tracks container dependencies (from depends_on in compose) and
+# refuses to remove a container that has dependents. This function removes
+# dependents leaf-first so the target can then be safely removed.
+# Sets REMOVED_DEPS=() with the list of removed container names.
+REMOVED_DEPS=()
+remove_dependents() {
+    local container="$1"
+    REMOVED_DEPS=()
+    local deps="${DEPENDENTS[$container]:-}"
+    if [ -z "$deps" ]; then
+        return
+    fi
+    for dep in $deps; do
+        if podman container exists "$dep" 2>/dev/null; then
+            print_info "Stopping dependent container $dep ..."
+            podman stop "$dep" 2>/dev/null || true
+            podman rm -f "$dep" 2>/dev/null || true
+            REMOVED_DEPS+=("$dep")
+        fi
+    done
+}
+
+# Restart containers that were removed as dependents (root-first order).
+restart_dependents() {
+    if [ ${#REMOVED_DEPS[@]} -eq 0 ]; then
+        return
+    fi
+    local i
+    for (( i=${#REMOVED_DEPS[@]}-1; i>=0; i-- )); do
+        local dep="${REMOVED_DEPS[$i]}"
+        local dep_service="${CONTAINER_TO_SERVICE[$dep]:-}"
+        if [ -n "$dep_service" ]; then
+            print_info "Restarting dependent $dep ..."
+            podman-compose up -d "$dep_service" || true
+        fi
+    done
+}
 
 # Ask a yes/no question. Returns 0 for yes, 1 for no.
 ask_yes_no() {
@@ -255,7 +305,7 @@ rebuild_runners() {
 
     # Start runners
     print_info "Starting n8n Runners with new image ..."
-    if podman-compose up -d --force-recreate n8n-runners; then
+    if podman-compose up -d n8n-runners; then
         print_success "n8n Runners rebuilt and updated successfully"
         return 0
     else
@@ -349,17 +399,21 @@ apply_updates() {
         new_image_id=$(podman image inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
         new_image_id=$(normalize_id "$new_image_id")
 
+        # Podman tracks container dependencies (from depends_on) and refuses
+        # to remove a container that has dependents. Remove dependents first.
+        remove_dependents "$container"
+
         # Proceed with update — stop, clean up, and restart
         print_info "Stopping $name ..."
         if ! podman-compose stop "$service"; then
             print_error "Failed to stop $name"
+            restart_dependents
             ((failed++)) || true
             echo ""
             continue
         fi
 
         # Force-remove container so podman-compose recreates it with the new image.
-        # Must be unconditional — state-based checks miss "created"/"dead" states.
         print_info "Removing old container ..."
         podman rm -f "$container" 2>/dev/null || true
 
@@ -369,16 +423,14 @@ apply_updates() {
             podman rmi "$old_image_id" 2>/dev/null || true
         fi
 
-        # --force-recreate ensures podman-compose creates a fresh container
-        # with the newly-pulled image, rather than reusing cached state.
         print_info "Starting $name with new image ..."
-        if podman-compose up -d --force-recreate "$service"; then
+        if podman-compose up -d "$service"; then
             # Verify the new container is actually using the updated image
             local verify_id
             verify_id=$(normalize_id "$(podman inspect --format '{{.Image}}' "$container" 2>/dev/null || echo "")")
 
             if [ -n "$verify_id" ] && [ -n "$old_image_id" ] && [ "$verify_id" = "$old_image_id" ]; then
-                print_error "$name — still running old image after force-recreate (${verify_id:0:12})"
+                print_error "$name — still running old image (${verify_id:0:12})"
                 ((failed++)) || true
             else
                 print_success "$name updated (image: ${old_image_id:0:12} → ${verify_id:0:12})"
@@ -392,6 +444,14 @@ apply_updates() {
             print_error "Failed to start $name"
             ((failed++)) || true
         fi
+
+        # Restart any dependents that were removed (skip n8n-runners if
+        # n8n was updated — rebuild_runners will handle it separately).
+        if [ "$container" = "n8n" ]; then
+            # n8n-runners will be rebuilt below, don't restart with old image
+            REMOVED_DEPS=()
+        fi
+        restart_dependents
         echo ""
     done
 
