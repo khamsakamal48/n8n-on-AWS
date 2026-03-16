@@ -75,21 +75,10 @@ echo ""
 # --- Install Service ---
 
 log "Installing systemd service..."
-# Substitute the current user and group into the service file
-# This ensures the service runs as the same user who deployed the containers
-CURRENT_USER="$(id -un)"
-CURRENT_GROUP="$(id -gn)"
-CURRENT_UID="$(id -u)"
-
-log "Configuring service to run as user: $CURRENT_USER (group: $CURRENT_GROUP, UID: $CURRENT_UID)"
-sed "s/__DEPLOY_USER__/${CURRENT_USER}/g; s/__DEPLOY_GROUP__/${CURRENT_GROUP}/g; s/__DEPLOY_UID__/${CURRENT_UID}/g" \
-    "$SERVICE_FILE" | sudo tee /etc/systemd/system/n8n-stack.service >/dev/null
+sudo cp "$SERVICE_FILE" /etc/systemd/system/n8n-stack.service
 
 log "Reloading systemd daemon..."
 sudo systemctl daemon-reload
-
-log "Enabling lingering for rootless Podman at boot..."
-sudo loginctl enable-linger "$CURRENT_USER"
 
 log "Enabling n8n-stack.service to start on boot..."
 sudo systemctl enable n8n-stack.service
