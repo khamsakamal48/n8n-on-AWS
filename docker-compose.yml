@@ -53,10 +53,10 @@ services:
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       # Direct bind mounts (podman-compose ignores driver_opts on named volumes)
-      - ./postgres/data:/var/lib/postgresql/data:Z
-      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro,Z
+      - ./postgres/data:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
       # Init scripts run ONLY on first boot (empty data dir). Safe to keep mounted.
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro,Z
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     deploy:
       resources:
@@ -127,8 +127,8 @@ services:
       - --requirepass
       - ${REDIS_PASSWORD}
     volumes:
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro,Z
-      - ./redis/data:/data:Z
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./redis/data:/data
     deploy:
       resources:
         limits:
@@ -247,7 +247,7 @@ services:
     #   sudo chown -R 1000:1000 ./n8n/data
     user: "1000:1000"
     volumes:
-      - ./n8n/data:/home/node/.n8n:Z
+      - ./n8n/data:/home/node/.n8n
     deploy:
       resources:
         limits:
@@ -404,11 +404,11 @@ services:
     volumes:
       # Persistent HuggingFace model cache — survives container restarts
       # VLM models (SmolVLM, SmolDocling, GraniteDocling) are stored here
-      - ./docling/hf-cache:/home/default/.cache/huggingface:Z
+      - ./docling/hf-cache:/home/default/.cache/huggingface
       # Persistent docling pipeline model artifacts cache
-      - ./docling/models:/home/default/.cache/docling:Z
+      - ./docling/models:/home/default/.cache/docling
       # Shared directory for document input/output with n8n
-      - ./docling/documents:/documents:Z
+      - ./docling/documents:/documents
 
     # --- Resource Limits (COMMENTED OUT — enable when ready to constrain) ---
     # Suggested production values for t3.xlarge with Docling running

@@ -15,11 +15,19 @@ WorkingDirectory=/opt/n8n-production
 User=__DEPLOY_USER__
 Group=__DEPLOY_GROUP__
 
+# Rootless Podman requires the user's XDG runtime directory
+Environment=XDG_RUNTIME_DIR=/run/user/__DEPLOY_UID__
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/__DEPLOY_UID__/bus
+
 # Ensure .env is readable by the service user before podman-compose tries to parse it.
 # The '+' prefix runs this command with full (root) privileges regardless of User=,
 # so the chown always succeeds. This self-heals ownership after 'sudo vi .env' or
 # similar root-owned edits that would otherwise cause a PermissionError.
 ExecStartPre=+/bin/chown __DEPLOY_USER__:__DEPLOY_GROUP__ /opt/n8n-production/.env
+
+# Apply SELinux labels to bind-mounted directories so containers can access them
+# The '+' prefix runs with root privileges to ensure chcon succeeds
+ExecStartPre=+/bin/bash -c 'chcon -R -t container_file_t /opt/n8n-production/postgres/ /opt/n8n-production/redis/ /opt/n8n-production/n8n/ /opt/n8n-production/docling/ 2>/dev/null || true'
 
 # Clean up any stopped containers before starting
 # This prevents name conflicts when restarting the service after manual podman stop

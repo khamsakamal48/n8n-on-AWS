@@ -124,10 +124,14 @@ log "Installing n8n-stack auto-start service..."
 # This ensures the service runs as the same user who deployed the containers
 CURRENT_USER="$(id -un)"
 CURRENT_GROUP="$(id -gn)"
-sed "s/__DEPLOY_USER__/${CURRENT_USER}/g; s/__DEPLOY_GROUP__/${CURRENT_GROUP}/g" \
+CURRENT_UID="$(id -u)"
+sed "s/__DEPLOY_USER__/${CURRENT_USER}/g; s/__DEPLOY_GROUP__/${CURRENT_GROUP}/g; s/__DEPLOY_UID__/${CURRENT_UID}/g" \
     "$SCRIPT_DIR/systemd/n8n-stack.service" | sudo tee /etc/systemd/system/n8n-stack.service >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable n8n-stack.service
+
+# Enable lingering so rootless Podman works at boot (before user login)
+sudo loginctl enable-linger "$CURRENT_USER"
 
 log "Installing daily image update-check timer..."
 sudo cp "$SCRIPT_DIR/systemd/n8n-check-updates.service" /etc/systemd/system/
