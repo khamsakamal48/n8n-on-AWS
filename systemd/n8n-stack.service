@@ -25,10 +25,6 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/__DEPLOY_UID__/bus
 # similar root-owned edits that would otherwise cause a PermissionError.
 ExecStartPre=+/bin/chown __DEPLOY_USER__:__DEPLOY_GROUP__ /opt/n8n-production/.env
 
-# Apply SELinux labels to bind-mounted directories so containers can access them
-# The '+' prefix runs with root privileges to ensure chcon succeeds
-ExecStartPre=+/bin/bash -c 'chcon -R -t container_file_t /opt/n8n-production/postgres/ /opt/n8n-production/redis/ /opt/n8n-production/n8n/ /opt/n8n-production/docling/ 2>/dev/null || true'
-
 # Clean up any stopped containers before starting
 # This prevents name conflicts when restarting the service after manual podman stop
 ExecStartPre=/bin/bash -c 'for container in n8n-postgres n8n-redis n8n n8n-runners n8n-docling; do \
@@ -49,10 +45,6 @@ ExecStop=/usr/bin/podman-compose down --timeout 60
 # Restart policy: always restart if the service fails
 Restart=on-failure
 RestartSec=10s
-
-# Security hardening
-# Prevent privilege escalation
-NoNewPrivileges=true
 
 # Resource limits (prevent runaway processes from exhausting system)
 # These are SYSTEMD service limits, NOT container limits

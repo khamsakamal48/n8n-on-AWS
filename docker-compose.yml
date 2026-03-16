@@ -41,6 +41,8 @@ services:
     image: docker.io/library/postgres:latest
     container_name: n8n-postgres
     restart: always
+    security_opt:
+      - label:disable
     networks:
       - n8n-net
     # NOTE: No port mapping — PostgreSQL is only accessible within n8n-net
@@ -113,6 +115,8 @@ services:
     image: docker.io/library/redis:latest
     container_name: n8n-redis
     restart: always
+    security_opt:
+      - label:disable
     networks:
       - n8n-net
     # NOTE: No port mapping — Redis is only accessible within n8n-net
@@ -170,6 +174,8 @@ services:
     image: docker.n8n.io/n8nio/n8n:stable
     container_name: n8n
     restart: always
+    security_opt:
+      - label:disable
     networks:
       - n8n-net
     ports:
@@ -357,6 +363,8 @@ services:
     image: quay.io/docling-project/docling-serve-cpu:latest
     container_name: n8n-docling
     restart: always
+    security_opt:
+      - label:disable
     networks:
       - n8n-net
     ports:
