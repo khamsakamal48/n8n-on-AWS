@@ -41,8 +41,6 @@ services:
     image: docker.io/library/postgres:latest
     container_name: n8n-postgres
     restart: always
-    security_opt:
-      - label:disable
     networks:
       - n8n-net
     # NOTE: No port mapping — PostgreSQL is only accessible within n8n-net
@@ -55,10 +53,10 @@ services:
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       # Direct bind mounts (podman-compose ignores driver_opts on named volumes)
-      - ./postgres/data:/var/lib/postgresql/data
-      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/data:/var/lib/postgresql/data:Z
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro,Z
       # Init scripts run ONLY on first boot (empty data dir). Safe to keep mounted.
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro,Z
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
     deploy:
       resources:
@@ -115,8 +113,6 @@ services:
     image: docker.io/library/redis:latest
     container_name: n8n-redis
     restart: always
-    security_opt:
-      - label:disable
     networks:
       - n8n-net
     # NOTE: No port mapping — Redis is only accessible within n8n-net
@@ -131,8 +127,8 @@ services:
       - --requirepass
       - ${REDIS_PASSWORD}
     volumes:
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
-      - ./redis/data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro,Z
+      - ./redis/data:/data:Z
     deploy:
       resources:
         limits:
@@ -174,8 +170,6 @@ services:
     image: docker.n8n.io/n8nio/n8n:stable
     container_name: n8n
     restart: always
-    security_opt:
-      - label:disable
     networks:
       - n8n-net
     ports:
@@ -253,7 +247,7 @@ services:
     #   sudo chown -R 1000:1000 ./n8n/data
     user: "1000:1000"
     volumes:
-      - ./n8n/data:/home/node/.n8n
+      - ./n8n/data:/home/node/.n8n:Z
     deploy:
       resources:
         limits:
@@ -363,8 +357,6 @@ services:
     image: quay.io/docling-project/docling-serve-cpu:latest
     container_name: n8n-docling
     restart: always
-    security_opt:
-      - label:disable
     networks:
       - n8n-net
     ports:
@@ -412,11 +404,11 @@ services:
     volumes:
       # Persistent HuggingFace model cache — survives container restarts
       # VLM models (SmolVLM, SmolDocling, GraniteDocling) are stored here
-      - ./docling/hf-cache:/home/default/.cache/huggingface
+      - ./docling/hf-cache:/home/default/.cache/huggingface:Z
       # Persistent docling pipeline model artifacts cache
-      - ./docling/models:/home/default/.cache/docling
+      - ./docling/models:/home/default/.cache/docling:Z
       # Shared directory for document input/output with n8n
-      - ./docling/documents:/documents
+      - ./docling/documents:/documents:Z
 
     # --- Resource Limits (COMMENTED OUT — enable when ready to constrain) ---
     # Suggested production values for t3.xlarge with Docling running
