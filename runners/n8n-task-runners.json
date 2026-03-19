@@ -25,7 +25,7 @@
       ],
       "env-overrides": {
         "NODE_FUNCTION_ALLOW_BUILTIN": "crypto",
-        "NODE_FUNCTION_ALLOW_EXTERNAL": "",
+        "NODE_FUNCTION_ALLOW_EXTERNAL": "pizzip",
         "N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST": "0.0.0.0"
       }
     },

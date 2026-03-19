@@ -11,6 +11,9 @@ USER root
 RUN cd /opt/runners/task-runner-python && \
     uv pip install pandas numpy requests
 
+# Install pizzip for JavaScript task runner
+RUN npm install -g pizzip
+
 # Copy custom task runners configuration
 COPY n8n-task-runners.json /etc/n8n-task-runners.json
 
